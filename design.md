@@ -1,0 +1,347 @@
+# agmsg-go 設計ドキュメント
+
+## 1. 概要 / オリジナルとの関係
+
+`agmsg-go` は、bash 製ツール [**fujibee/agmsg**](https://github.com/fujibee/agmsg) を Go で書き直す fork である。
+
+オリジナル agmsg は、Claude Code / Codex / Gemini CLI / Antigravity などの **CLI AI エージェント同士が、共有 SQLite ファイル 1 個を通信路にしてメッセージをやり取りする**ためのツールである。デーモンを持たず、ネットワークも使わない。各エージェントは `~/.agents/skills/<cmd>/db/messages.db`（SQLite WAL モード）に対し `sqlite3` CLI で直接 INSERT / SELECT することで通信する。中央プロセスは存在しない。
+
+設計思想スローガンは **"No daemon, no network, no complexity"**。「自分で管理する常駐プロセスを持たない」ことを最重視し、受信検知（monitor の watch）はホストのセッション寿命に寿命を預ける形で実現している。
+
+本 fork は、この**通信モデル・通信路・アイデンティティモデル・配信モードといった設計の核を維持したまま**、bash 実装が構造的に抱える弱点（後述）を Go の型システム・標準ライブラリ・テスト機構で解消することを目的とする。
+
+---
+
+## 2. 設計目標と非目標
+
+### 設計目標
+
+| 目標 | 内容 |
+|---|---|
+| No daemon 思想の継承 | broker / 常駐 daemon を新設しない。通信路は共有 SQLite ファイルのまま。受信検知の常駐はホストのセッション寿命に預ける構造を維持する。 |
+| 依存最小・単一バイナリ | `sqlite3` CLI を含む外部バイナリ依存を排除し、`go build` で単一バイナリに完結させる。クロスコンパイル可能を維持する。 |
+| SQL 安全性 | 文字列連結による SQL 組み立て（手動エスケープ）を撤廃し、placeholder / prepared statement に置き換える。 |
+| テスタビリティ | 並行・ライフサイクル・世代管理ロジックを Go の単体テストで検証可能にする。 |
+| アイドル効率 | 受信が無い間に `sqlite3` プロセスを定期 fork し続けるアイドルコストを削減する。 |
+| 互換性 | 既存の `messages.db` スキーマ・`teams/<team>/config.json`・ユーザ config と互換を保つ（同じ DB を bash 版・Go 版が読めることが望ましい）。 |
+
+### 非目標
+
+- **ネットワーク通信・リモート配送**は対象外。あくまでローカルファイルシステム上の共有 SQLite が通信路である。
+- **メッセージの暗号化・認証・アクセス制御**は対象外（ローカルユーザ前提）。
+- **GUI / TUI** は対象外。CLI サブコマンドのみ。
+- **broker daemon の常設**は非目標（§12 で将来オプションとして言及するに留める）。
+
+---
+
+## 3. なぜ Go か
+
+### 3.1 正当化は「規模(LOC)」ではなく「複雑さの質」
+
+agmsg を Go に書き直す正当化は、行数が多いからではない。**bash 実装が抱える複雑さの「質」が、ちょうど sh の不得手と一致している**からである。以下の各弱点は、Go の標準的な道具立てで構造的に消える。
+
+| オリジナルの構造的弱点 | Go 化による解決 |
+|---|---|
+| **(1) SQL エスケープが手動 `sed "s/'/''/g"` 依存**。文字列連結で SQL を組み立てており、エスケープ漏れが 1 箇所でもあれば破綻する。**最大の構造的弱点。** | **prepared statement / placeholder** で「文字列としてエスケープする」問題自体を構造的に消す。`database/sql` の `?` バインドにより、メッセージ本文に何が入ろうと SQL インジェクションも構文破壊も起こらない。**これが Go 化の最大の利得。** |
+| **(2) session-start.sh の複雑さ**。pid / session_id / cc_pid を `ps -o` で追い、`/clear` や `--resume` による SessionStart 再発火での二重ウォッチャ防止、孤児プロセス回収、pid 再利用対策を、毎回ゼロから走る短命スクリプト内で再計算している。 | pid / 世代 / セッション同一性を**構造体 + テスト可能な関数**に分解する。状態遷移を単体テストで固定できる。 |
+| **(3) OS 分岐**。`ps -o`, `stat -f`(Darwin) / `stat -c`(Linux) などプラットフォーム差を都度分岐。 | **標準ライブラリ + ビルドタグ**で吸収。`os`, `os/exec`, `runtime`, `//go:build` により分岐を局所化・型安全化する。 |
+| **(4) テスタビリティ**。bats でしかテストできず、並行・ライフサイクル系ロジックが検証しづらい。 | 通常の `go test`（テーブルドリブン・並行テスト・`testing` のリーク検出）が書ける。 |
+| **(5) monitor のポーリング**。何も来ていない時も 5 秒ごとに `sqlite3` プロセスを fork し続ける（アイドルコスト）。 | fsnotify による**イベント駆動**で「何も来ない時は何もしない」を実現（§8）。 |
+
+### 3.2 得るもの / 失うもの
+
+**得るもの**: SQL 安全性（構造的保証）、外部 `sqlite3` CLI 依存の排除、単体テスト、アイドル効率、型による状態管理。
+
+**失うもの**（§12 のトレードオフでも再掲）:
+
+- ユーザが `cat *.sh` でツールの中身を**そのまま監査できる透明性**を失う（コンパイル済みバイナリになる）。
+- macOS 配布時の**コード署名 / notarization** という新たな手間が生じる（bash スクリプトには不要だった）。
+- ビルド工程（`go build` / クロスビルド）が配布の前提になる。
+
+---
+
+## 4. 全体アーキテクチャ
+
+中央プロセスは存在しない。各エージェント（の背後で動く `agmsg` バイナリ）が、共有 SQLite ファイルに直接読み書きする。
+
+```
+                    共有ファイルシステム (ローカル)
+        ┌─────────────────────────────────────────────────┐
+        │   ~/.agents/skills/<cmd>/db/messages.db          │
+        │   ├── messages.db        (メイン DB)              │
+        │   ├── messages.db-wal    (WAL: 書き込みはここに乗る)│
+        │   └── messages.db-shm                            │
+        │   teams/<team>/config.json   (チーム名簿)          │
+        │   config (ユーザ設定: 配信モード等)                 │
+        └─────────────────────────────────────────────────┘
+              ▲            ▲                    ▲
+              │ INSERT     │ SELECT             │ SELECT (未読)
+              │ (placeholder)                   │ + fsnotify watch
+              │            │                    │
+   ┌──────────┴───┐ ┌──────┴───────┐  ┌─────────┴──────────┐
+   │ agmsg send   │ │ agmsg inbox  │  │ agmsg watch        │
+   │ (Agent A)    │ │ (Agent B)    │  │ (Agent C: monitor) │
+   └──────┬───────┘ └──────────────┘  └─────────┬──────────┘
+          │                                     │ stream 1 行/件
+   ┌──────┴───────┐                   ┌─────────┴──────────┐
+   │ Claude Code  │                   │ ホスト Monitor ツール │
+   │ Codex / etc. │                   │ (セッション寿命に追従) │
+   └──────────────┘                   └────────────────────┘
+
+   全エージェントが「同じ単一バイナリ agmsg」のサブコマンドを呼ぶ。
+   No daemon: agmsg 自身は常駐 broker を持たない。
+   watch のみがホストセッションの寿命に追従する長命プロセス。
+```
+
+複数リーダ + 1 ライタの SQLite WAL モデルにより、複数エージェントの同時読み取りと逐次書き込みが安全に成立する。
+
+---
+
+## 5. データモデル
+
+### 5.1 messages テーブル
+
+オリジナルと互換のスキーマを維持する。
+
+```sql
+CREATE TABLE messages (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,  -- 単調増加。watermark に使う
+  team TEXT NOT NULL,
+  from_agent TEXT NOT NULL,
+  to_agent TEXT NOT NULL,
+  body TEXT NOT NULL,
+  created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%SZ','now')),
+  read_at TEXT                           -- NULL = 未読
+);
+
+CREATE INDEX idx_unread  ON messages(team, to_agent, read_at);  -- 未読検索用
+CREATE INDEX idx_history ON messages(team, created_at);          -- 履歴用
+```
+
+- `id` は単調増加であり、後述の watch が watermark（既読位置）として使う。
+- `read_at IS NULL` が未読を表す。inbox は未読のみを返し、読んだら `read_at` を埋める。
+- すべての値挿入・検索条件は **placeholder バインド（`?`）** で渡す。本文 `body` に `'` や `;` や改行が含まれても安全。これが bash 版との決定的な差。
+
+### 5.2 SQLite ドライバ選定
+
+| ドライバ | 方式 | 単一バイナリ | クロスコンパイル | 評価 |
+|---|---|---|---|---|
+| **modernc.org/sqlite** | **純 Go（CGO 不要）** | ◎ | ◎（`GOOS`/`GOARCH` を変えるだけ） | **第一候補（採用）** |
+| mattn/go-sqlite3 | CGO（C 実装をリンク） | △（C ツールチェーン必須） | ✕（ターゲットごとに C クロスコンパイラが必要） | 却下寄り |
+
+**採用: `modernc.org/sqlite`。** 理由は設計目標「単一バイナリ・クロスコンパイル維持・外部依存最小」と直結する。CGO を使わないため、`CGO_ENABLED=0` のまま `GOOS=linux GOARCH=arm64 go build` のような単純クロスビルドが成立し、配布が容易。実行時に `sqlite3` CLI を呼ぶ必要もなくなり（SQLite エンジンがバイナリ内蔵）、§2 の「外部バイナリ依存排除」が完成する。
+
+`mattn/go-sqlite3` は成熟度・性能で勝るが、CGO により C ツールチェーンとターゲット別クロスコンパイラを要求し、本プロジェクトの「単一バイナリで簡単に配れる」という核心価値を損なう。性能要件は人間×LLM のメッセージング程度では純 Go 実装で十分であり、却下する。
+
+### 5.3 teams config / user config
+
+- **チーム名簿**: `teams/<team>/config.json`。`agents` 配下に `registrations[]` を持つ JSON。オリジナル互換。Go では構造体に unmarshal して扱う。
+- **ユーザ config**: 配信モード（monitor/turn/both/off）等のユーザ設定を保持。`agmsg config` / `agmsg delivery set` で読み書きする。
+
+---
+
+## 6. アイデンティティモデル
+
+エージェントは **`(name, team)` の組**で識別される。`project path` と `type`（claude-code / codex / gemini / antigravity）は**メタデータ**であり、同一性の判定には使わない。
+
+- 同じ `(name, team)` であれば、複数の project から join しても**同一アイデンティティ**として扱われ、`registrations[]` に登録情報が積まれる。
+- `whoami` は登録状態を表現する。状態は概念的に 4 つ（未登録 / 単一登録 / 複数登録（複数 project から同一名で参加）/ actas による役割多重）に整理できる。
+- **`actas <name>` / `drop <name>`**: 同一 project・同一 type で、役割（name）だけを複数持つための仕組み。1 つのセッションが複数の役割を演じ分けたり外したりできる。
+
+Go では `(name, team)` を値型のキーとして扱い、registration をスライスで保持する。同一性判定が型で固定されるため、bash 版で文字列比較に散在していた同一性ロジックを 1 箇所に集約できる。
+
+---
+
+## 7. 配信モード（受信の割り込み）とホストフック連携
+
+受信メッセージを、どうやってエージェントの「コンテキスト」に割り込ませるか（＝エージェントに気づかせるか）を決めるのが配信モードである。オリジナルの 4 モードを踏襲する。
+
+| mode | 機構 | 遅延 | 主な対象 |
+|---|---|---|---|
+| **monitor**（Claude Code 既定） | SessionStart フック → ホストの Monitor ツール → `agmsg watch` がストリーム | 約 5 秒（fsnotify 化で実質即時、§8） | Claude Code（Monitor ツールあり） |
+| **turn**（Codex 既定） | Stop フック → ターン間に `agmsg check-inbox` | 次の発話まで | Monitor ツールが無い Codex 等 |
+| **both** | monitor を主、turn を保険として併用 | 約 5 秒 | 取りこぼし防止重視 |
+| **off** | 自動配信なし（手動 `agmsg inbox`） | — | 手動派 |
+
+ホストフック（SessionStart / Stop）から呼び出すエントリポイントも、**同じ単一バイナリのサブコマンド**にする（`agmsg watch`, `agmsg check-inbox` 等）。これにより、フックスクリプトはバイナリを呼ぶだけの薄い殻になり、bash 実装で session-start.sh に集中していた複雑さをバイナリ内部の型安全なコードへ移動できる。
+
+`monitor` の watch は、起動時に `MAX(id)` を watermark とし、`id > LAST` の差分のみをストリームする。出力は 1 行 = `<ts> | <team> | <from> → <to> | <body>`。
+
+---
+
+## 8. 受信検知の設計
+
+### 8.1 アーキテクチャ選択肢の比較
+
+| 案 | 機構 | 遅延 | アイドルコスト | broker ライフサイクル | 評価 |
+|---|---|---|---|---|---|
+| **A. ファイルポーリング**（オリジナル移植） | 定期的に `SELECT ... WHERE id > LAST` | 約 5 秒 | **高**（何も来なくても定期実行） | 不要 | 単純だがアイドル無駄 |
+| **B. fsnotify + ファイル監視 + ポーリング保険** | OS のファイル変更通知でトリガ、長めのポーリングを保険併走 | 実質即時 | **低**（変更が無ければ何もしない） | **不要** | **採用** |
+| **C. ローカル broker daemon + Unix ソケット push** | 常駐 broker が変更を push | 即時 | ゼロ | **必要（地獄）** | 却下（将来オプション） |
+
+### 8.2 採用: 案 B（fsnotify + ポーリング保険）
+
+**最大の美点は「broker のライフサイクル管理を持ち込まずに済むこと」**、すなわちオリジナルの **No daemon 思想を尊重したままアイドル効率を改善できる**点にある。
+
+Go の [`github.com/fsnotify/fsnotify`](https://github.com/fsnotify/fsnotify) は、`inotify`(Linux) / `kqueue`(BSD) / `FSEvents`(macOS) / `ReadDirectoryChangesW`(Windows) を **1 つの API に抽象化**する。オリジナルが fsnotify を避けた理由（外部バイナリ依存・プラットフォーム分岐の保守コスト・ポーリングとの両建てによる行数増）は、Go の標準的なライブラリ採用によって**ほぼ消える**。
+
+#### 正当化は「遅延短縮」ではなく「アイドル効率」に置く
+
+fsnotify を採用する正当化は、遅延を 5 秒 → 即時に縮める点**ではない**。実用ワークロードでは、受信の数秒の遅延は **LLM の推論時間に埋もれて体感差にならない**。本当の利得は **「何も来ていない時に、何のプロセスも fork せず、CPU も使わず、静かに待てる」アイドル効率**である。これが案 A に対する明確な優位点。
+
+### 8.3 取りこぼし対策: 長めのポーリングを保険として併走
+
+fsnotify は万能ではなく、以下の理由でイベントを**取りこぼしうる**:
+
+- イベントキューの溢れ（短時間に大量変更）
+- 監視を確立する**前**に発生した書き込み
+- OS による変更イベントの coalescing（まとめられて 1 回になる）
+
+そのため、**長めのポーリング（例: 30 秒間隔）を保険として常時併走**させ、fsnotify がイベントを落としても最大 30 秒で必ず追いつく構造にする。これは「fsnotify を主、ポーリングを保険」という堅牢な fsnotify 実装の定石である。アイドルコストは案 A（5 秒ポーリング）より大幅に低い。
+
+いずれの経路でトリガされても、実際の取得は **`id > watermark` の SELECT** に一本化する。fsnotify は「いつ SELECT を撃つか」を決めるだけで、何が新着かは常に DB が単調増加 id で正しく答える。これにより重複配信や順序逆転は起きない。
+
+### 8.4 WAL を fsnotify で見る際の罠
+
+SQLite を WAL モードで使う場合、**書き込みは `messages.db` 本体ではなく `messages.db-wal` ファイルに乗る**。checkpoint（WAL → 本体への反映）が起きるまで本体ファイルの mtime は更新されないことがあり、また mtime の粒度（秒単位など）の影響で「**`messages.db` 本体だけを監視する**」という直感的な実装は期待どおりに発火しない。
+
+#### 監視対象の設計判断
+
+- **`messages.db` 単体を監視 → 不可**（WAL に書かれるため本体が動かない）。
+- **`messages.db-wal` を監視**: 書き込みを最も早く捉えられるが、`-wal` は checkpoint で truncate / 再作成されうるため、ファイルの作り直しに監視が追従できる実装にする必要がある。
+- **DB の置かれた*ディレクトリ全体*を監視（採用方針）**: `messages.db` / `-wal` / `-shm` のいずれが変化しても発火する。`-wal` の再作成にも強い。発火条件をファイル単位で絞らずディレクトリ単位にすることで、WAL の実装詳細に依存しない堅牢さを得る。発火後の実取得は §8.3 のとおり `id > watermark` SELECT に委ねるため、過剰発火（無関係な `-shm` 変更等）があっても「SELECT して 0 件」で安全に空振りするだけで害はない。
+
+---
+
+## 9. プロセス / ライフサイクル管理
+
+`watch`（monitor モードの長命プロセス）は、agmsg において唯一の常駐的存在であり、オリジナルで session-start.sh が苦労していた領域である。Go では以下を**構造体 + テスト可能な関数**として実装し、安全性を型で担保する。
+
+### 9.1 二重起動防止（多重ウォッチャ防止）
+
+`/clear` や `--resume` による SessionStart の再発火で、同一セッションに対し watch が二重に起動する事故を防ぐ。
+
+- セッション同一性（session_id / 親 pid 等）を**明示的な構造体フィールド**として保持し、起動時に既存ウォッチャの生存確認を行う。
+- ロック手段としてはロックファイル（pid + 世代を記録）を用い、**pid 再利用**（同じ pid 値が別プロセスに再割り当てされる問題）に対しては pid 単独ではなく「pid + 起動時刻 / 世代トークン」で同一性を判定する。bash 版で `ps -o` を都度パースしていた処理を、検証可能な 1 関数に閉じ込める。
+
+### 9.2 孤児プロセス回収
+
+ホストセッションが消えたのに watch だけが生き残る孤児を回収する。
+
+- watch は**親（ホストセッション）の生存を監視**し、親が消えたら自身も終了する（self-terminate）。
+- 起動時に、ロックファイルが指す旧ウォッチャが既に死んでいれば、その残骸（stale lock）を回収してから起動する。
+
+### 9.3 テスト容易性
+
+上記のライフサイクル判定（生存確認・世代比較・stale lock 回収）はすべて副作用を注入可能なインターフェース越しに書き、`go test` で状態遷移を固定する。これは bash + bats では困難だった領域であり、Go 化の主要な動機の 1 つ（§3.1 弱点 (2)(4)）。
+
+### 9.4 「No daemon」は半分標語であることの明記
+
+正直に書くと、**monitor の watch は実態として常駐ポーリング（兼イベント待ち）プロセス**であり、この点は Go 化後も変わらない。watch はホストのセッション寿命に自らの寿命を預けることで「**自分で管理する常駐 broker は持たない**」を成立させているにすぎず、「プロセスが一切常駐しない」わけではない。
+
+Go 化が変えるのは「常駐をなくすこと」ではなく、**「その常駐の管理（二重起動防止・孤児回収・世代管理）を、型と構造とテストで安全にすること」**である。No daemon は思想としては真だが、文字どおりではない——この点を曖昧にしない。
+
+---
+
+## 10. CLI サブコマンド構成
+
+オリジナルの各 `*.sh` に対応するサブコマンドを、単一バイナリ `agmsg` のサブコマンドとして再設計する。
+
+| オリジナル `*.sh` | Go サブコマンド | 役割 |
+|---|---|---|
+| send.sh | `agmsg send <to> <body>` | メッセージ送信（INSERT、placeholder バインド） |
+| inbox.sh | `agmsg inbox` | 未読メッセージ取得（取得後 `read_at` 更新） |
+| history.sh | `agmsg history [N]` | 履歴（最新 N 件） |
+| join.sh | `agmsg join <team>` | チーム参加（registration 追加） |
+| leave.sh | `agmsg leave <team>` | チーム離脱 |
+| team.sh | `agmsg team` | チーム名簿の表示・操作 |
+| whoami.sh | `agmsg whoami` | 現在のアイデンティティ / 登録状態表示 |
+| identities.sh | `agmsg identities` | 登録一覧 |
+| delivery.sh | `agmsg delivery set <mode>` | 配信モード設定（monitor/turn/both/off） |
+| watch.sh | `agmsg watch` | monitor の長命ストリーム（フックから起動） |
+| check-inbox.sh | `agmsg check-inbox` | turn モードのターン間チェック（フックから起動） |
+| config.sh | `agmsg config` | ユーザ設定の読み書き |
+| reset.sh | `agmsg reset` | DB / 状態のリセット |
+| rename.sh | `agmsg rename <new>` | 自エージェント名の変更 |
+| rename-team.sh | `agmsg rename-team <new>` | チーム名の変更 |
+| actas.sh | `agmsg actas <name>` | 役割（name）の多重追加 |
+| drop.sh | `agmsg drop <name>` | 役割の除去 |
+
+ホストフック（SessionStart / Stop）から呼ぶエントリポイント（`watch` / `check-inbox`）も同じバイナリのサブコマンドにすることで、配布物は 1 つで完結する。
+
+---
+
+## 11. パッケージ構成案
+
+```
+agmsg-go/
+├── cmd/
+│   └── agmsg/
+│       └── main.go            # エントリポイント（サブコマンド dispatch のみ）
+├── internal/
+│   ├── cli/                   # 各サブコマンドの定義・引数解析
+│   │   ├── send.go
+│   │   ├── inbox.go
+│   │   ├── watch.go
+│   │   ├── delivery.go
+│   │   └── ...
+│   ├── store/                 # SQLite アクセス層（placeholder バインドを集約）
+│   │   ├── store.go           # messages の INSERT/SELECT/未読更新
+│   │   ├── schema.go          # CREATE TABLE / INDEX / migration
+│   │   └── store_test.go
+│   ├── identity/              # (name, team) アイデンティティ・registration・actas/drop
+│   │   ├── identity.go
+│   │   └── identity_test.go
+│   ├── watch/                 # 受信検知（fsnotify + ポーリング保険）
+│   │   ├── watcher.go         # fsnotify とポーリングの併走・watermark 管理
+│   │   ├── lifecycle.go       # 二重起動防止・孤児回収・世代管理
+│   │   └── watcher_test.go
+│   ├── delivery/              # 配信モード（monitor/turn/both/off）の解釈
+│   ├── config/                # ユーザ config / teams config の読み書き
+│   │   ├── user.go
+│   │   └── team.go
+│   └── paths/                 # ~/.agents/... のパス解決・OS 差吸収
+│       ├── paths.go
+│       ├── paths_darwin.go    # //go:build darwin
+│       └── paths_linux.go     # //go:build linux
+├── design.md
+├── README.md
+├── LICENSE
+└── go.mod
+```
+
+- **`internal/store`**: SQL を扱う唯一の層。placeholder バインドをここに閉じ込め、上位層は文字列 SQL を一切組み立てない（弱点 (1) の構造的封じ込め）。
+- **`internal/watch/lifecycle.go`**: §9 のライフサイクル管理。副作用を注入可能にして単体テスト。
+- **`internal/paths`**: OS 差をビルドタグで局所化（弱点 (3)）。
+- `internal/` 配下にすることで、外部からの import を禁じ、公開 API 面を持たない（このツールはライブラリではなくアプリ）。
+
+---
+
+## 12. トレードオフと将来課題
+
+### 12.1 案 C（broker daemon）について
+
+ローカル broker daemon + Unix ソケットで push する案 C は、**遅延もアイドルコストも構造的にゼロ**にできる魅力がある。しかし、
+
+- 誰が broker を起動するのか
+- クラッシュ時に誰が再起動するのか
+- アップデート時に旧プロセスをどう kill するのか
+- 複数バージョンの broker が同時に走ったらどうなるか
+
+という「**自分で管理する常駐プロセスのライフサイクル地獄**」を復活させる。これはオリジナルが最も避けたかったもの（No daemon 思想）と正面衝突する。よって**却下**する。将来、どうしても push 型の即時性が要求されるユースケース（高頻度・低遅延が LLM 推論時間に埋もれず効くケース）が現れた場合の**オプション**としてのみ言及するに留める。
+
+### 12.2 Go 化で失うもの
+
+| 失うもの | 内容 | 緩和策 |
+|---|---|---|
+| 透明性 | `cat *.sh` でツールの中身をそのまま読めなくなる。 | OSS としてソース公開・ビルド再現性を担保。 |
+| コード署名 / notarization | macOS 配布でバイナリの署名・公証が新たに必要。 | リリース手順に組み込む（bash には無かった工程）。 |
+| ビルド前提 | 配布にビルド工程（クロスビルド）が要る。 | CI でのマルチプラットフォームビルド。modernc.org/sqlite 採用で CGO 不要、クロスビルドは単純。 |
+
+### 12.3 その他の将来課題
+
+- **WAL 監視の実地検証**: §8.4 のディレクトリ監視方針が全 OS（特に macOS FSEvents の coalescing、Windows）で期待どおり発火するかの実測。
+- **bash 版との DB 互換性検証**: 同一 `messages.db` を bash 版・Go 版で混在運用できるかの確認。
+- **ポーリング保険の間隔チューニング**: 30 秒という保険間隔が、取りこぼし頻度とアイドルコストのバランスとして妥当かの実測。
+- **`watch` の親プロセス検知の移植性**: 親セッション消滅の検知手段が OS 横断で堅牢かの検証。
+```
