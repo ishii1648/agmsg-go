@@ -94,6 +94,8 @@ agmsg skills list               # 同梱 skills の一覧を表示
 
 **Tier 3: 任意（初期実装では後回し可）** — `agmsg reset` / `agmsg rename` / `agmsg rename-team` / `agmsg actas <name>` / `agmsg drop <name>`
 
+**運用補助** — `agmsg version`（version 表示）/ `agmsg upgrade [--check]`（GitHub Releases から最新版を取得して自身を置き換える。`--check` は確認のみ）
+
 詳細なコマンド対応表と Tier 分類は [design.md §10](./design.md) を参照してください。
 
 ## 配信モード

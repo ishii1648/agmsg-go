@@ -39,6 +39,7 @@ const defaultType = "claude-code"
 // だが、skills install の --force のような真偽フラグはここに登録して例外扱いする。
 var boolFlags = map[string]struct{}{
 	"force": {},
+	"check": {},
 }
 
 // tsLayout は created_at / read_at と揃えた ISO-8601 (UTC)。
@@ -251,8 +252,9 @@ func Run(ctx context.Context, e Env, args []string) error {
 		"watch":  {"name", "team", "interval"},
 		"join":   {"name", "type", "project"},
 		"leave":  {"name", "type", "project"},
-		"whoami": {"type", "project"},
-		"skills": {"dest", "force"},
+		"whoami":  {"type", "project"},
+		"skills":  {"dest", "force"},
+		"upgrade": {"check"},
 	}
 	allow, known := allowed[sub]
 	if !known {
@@ -278,6 +280,8 @@ func Run(ctx context.Context, e Env, args []string) error {
 		return cmdWhoami(ctx, e, l, f)
 	case "skills":
 		return cmdSkills(ctx, e, l, f)
+	case "upgrade":
+		return cmdUpgrade(ctx, e, l, f)
 	default:
 		// allowed マップと switch は同期している（到達しない）。
 		printUsage(e.Stderr)
@@ -297,6 +301,7 @@ Usage:
   agmsg whoami            [--type <type>] [--project <path>]
   agmsg skills install    [--dest <dir>] [--force]
   agmsg skills list
+  agmsg upgrade           [--check]
   agmsg version
 
 識別子 (name, team) はフラグ／環境変数 (AGMSG_NAME, AGMSG_TEAM, AGMSG_TYPE,
