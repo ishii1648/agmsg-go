@@ -1,10 +1,17 @@
 # agmsg-go
 
-> **共有 SQLite ファイル 1 個を通信路にした、CLI AI エージェント間メッセージング。デーモンなし・ネットワークなし。**
+> **共有 SQLite ファイル 1 個を通信路にした CLI AI エージェント間 IPC と、その上で動く協調ワークフロー（skills）を、1 つの binary から配る。デーモンなし・ネットワークなし。**
 
-`agmsg-go` は、bash 製ツール [**fujibee/agmsg**](https://github.com/fujibee/agmsg) にインスパイアされた **Go fork** です。
+`agmsg-go` は、bash 製ツール [**fujibee/agmsg**](https://github.com/fujibee/agmsg) を起点にした **Go 実装**です。IPC コア（`agmsg` binary）に加え、その上で動く協調ワークフローを **skills 層**として同梱します。
 
 Claude Code / Codex / Gemini CLI / Antigravity などの CLI AI エージェント同士が、共有 SQLite ファイルを介してメッセージをやり取りします。中央プロセス（broker / daemon）もネットワークも持たず、各エージェントが同じ DB ファイルに直接読み書きすることで通信が成立します。設計思想は **"No daemon, no network, no complexity"**。
+
+```sh
+go install github.com/ishii1648/agmsg-go/cmd/agmsg@latest   # IPC コアを入れる
+agmsg skills install                                        # 協調ワークフローを展開する
+```
+
+この 2 行で、エージェント間 IPC とその上の協調ワークフロー（`dispatch` / `review-loop`）一式が揃います。
 
 ## 2 つの層: IPC インフラ (mechanism) と skills (policy)
 
