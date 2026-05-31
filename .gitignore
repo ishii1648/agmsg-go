@@ -2,3 +2,6 @@
 
 # GoReleaser build output
 /dist/
+
+# `make build` 成果物
+/bin/

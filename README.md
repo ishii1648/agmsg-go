@@ -6,15 +6,18 @@
 
 Claude Code / Codex / Gemini CLI / Antigravity などの CLI AI エージェント同士が、共有 SQLite ファイルを介してメッセージをやり取りします。中央プロセス（broker / daemon）もネットワークも持たず、各エージェントが同じ DB ファイルに直接読み書きすることで通信が成立します。設計思想は **"No daemon, no network, no complexity"**。
 
-## スコープ: IPC インフラだけを提供する (mechanism, not policy)
+## 2 つの層: IPC インフラ (mechanism) と skills (policy)
 
-agmsg-go が提供するのは **エージェント間 IPC のインフラ（送る・受け取る・購読する・宛先を解決する）** だけです。その IPC を**どう使うか**——レビュー+修正ループ、複数 issue の orchestration、役割割り当て、合意形成など——は **agmsg-go には実装せず、利用側が `send` / `inbox` / `watch` を組み合わせて自由に構築します**。
+agmsg-go は **2 つの層**を同じリポジトリから配布します。両者は明確に分離されています。
 
-これは「最小限のプリミティブに留める」という意図的な制約です。「複数の利用側が別々の使い方をしうる機能」はツール側に入れません。詳細は [design.md §2.1](./design.md) を参照してください。
+- **インフラ層 — `agmsg` binary**: エージェント間 IPC のプリミティブ（送る・受け取る・購読する・宛先を解決する）。この層は **mechanism, not policy** を厳守し、「IPC をどう使うか」を binary には作り込みません。「複数の利用側が別々の使い方をしうる機能」はツール側に入れない、という意図的な制約です。
+- **skills 層 — `skills/` + `agmsg skills install`**: その IPC を使う具体的なワークフロー（`dispatch` / `review-loop`）。これは policy ですが、binary を `send` / `inbox` / `watch` / `join` 経由でのみ呼ぶ「消費者」として同梱されます。分離可能で opt-in です。
+
+当初は IPC インフラだけを提供する方針でしたが、協調ワークフロー全体を 1 箇所から配れる **delivery 容易化**のため skills 層の同梱へ方針変更しました。mechanism-not-policy は放棄しておらず、**binary コア層の原則として温存**しています。詳細は [design.md §2.1](./design.md) / [§13](./design.md) を参照してください。
 
 ## ステータス
 
-🚧 **設計フェーズ**です。実装はこれから着手します。設計の詳細は [design.md](./design.md) を参照してください。
+🚧 開発中です。**Tier 1 の IPC コア（`send` / `inbox` / `watch` / `join` / `leave` / `whoami`）は実装済み**で、skills 層（`dispatch` / `review-loop`）の同梱と `agmsg skills install` を追加しました。設計の詳細は [design.md](./design.md)、次の作業は [issues/](./issues) を参照してください。
 
 ## オリジナルとの違い
 
@@ -53,6 +56,19 @@ xattr -d com.apple.quarantine ./agmsg   # quarantine 属性を外す
 
 または Finder で右クリック →「開く」。コード署名 / notarization は導入していない（CLI には過剰なため）。警告を避けたい場合は上記 `go install` / `make install` を使う。
 
+### skills を展開する
+
+binary には skills 層（`dispatch` / `review-loop`）が埋め込まれており、次のコマンドで展開します（既定の展開先は `~/.claude/skills`）。
+
+```sh
+agmsg skills install            # ~/.claude/skills へ展開
+agmsg skills install --dest DIR # 展開先を指定
+agmsg skills install --force    # 既存ファイルを上書き（既定は保持）
+agmsg skills list               # 同梱 skills の一覧を表示
+```
+
+`go install` と合わせれば、協調ワークフロー一式が 2 行で揃います。詳細は [§skills](#skills-dispatch--review-loop) を参照してください。
+
 ## サブコマンド（暫定）
 
 すべて単一バイナリ `agmsg` のサブコマンドです。ホストフック（SessionStart / Stop）から呼ぶエントリポイントも同じバイナリに含まれます。これらは IPC プリミティブであり、組み合わせ方（オーケストレーション）は利用側が決めます。
@@ -83,6 +99,17 @@ xattr -d com.apple.quarantine ./agmsg   # quarantine 属性を外す
 | `turn` | Stop フック → ターン間に `agmsg check-inbox` | Monitor ツールが無い Codex 等 |
 | `both` | monitor 主 + turn 保険 | 取りこぼし防止 |
 | `off` | 自動配信なし（手動 `agmsg inbox`） | 手動派 |
+
+## skills (dispatch / review-loop)
+
+IPC プリミティブを使う具体的なワークフローを **skills 層**として同梱しています（binary とは分離された opt-in な policy 層。詳細は [design.md §13](./design.md)）。`agmsg skills install` で `~/.claude/skills` 等に展開して使います。
+
+| skill | 役割 | agmsg の使い方 |
+|---|---|---|
+| **dispatch** | 別リポジトリで CLI agent（claude / codex）を git worktree + tmux window で起動する。 | 起動した agent を `agmsg join` で team に auto-join し、親 session から `send` で到達可能にする。 |
+| **review-loop** | 実装済みコードを「逆エージェント」に反復レビューさせ収束させる（実装役は元 session に固定）。 | reviewer → implementer の verdict 通知・完了検知を `agmsg send` / `agmsg inbox` に載せる。 |
+
+いずれも **tmux で対話 agent のプロセスを起こし、agent 間の連絡を agmsg に載せる**構成です（tmux は launcher として残り、agmsg が置き換えるのは連絡だけ）。前提として `agmsg` が PATH にあること、tmux セッション内・git リポジトリ内であることが必要です。各 skill の `SKILL.md` に手順を記載しています。
 
 ## ドキュメント
 

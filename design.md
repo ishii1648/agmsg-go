@@ -10,7 +10,12 @@
 
 本 fork は、この**通信モデル・通信路・アイデンティティモデル・配信モードといった設計の核を維持したまま**、bash 実装が構造的に抱える弱点（後述）を Go の型システム・標準ライブラリ・テスト機構で解消することを目的とする。
 
-加えて本 fork は、提供範囲を **「エージェント間 IPC のインフラ」だけ**に明確に絞る。レビュー+修正ループや複数 issue の orchestration といった**「IPC をどう使うか」は実装せず、利用側に委ねる**（mechanism, not policy）。この境界の根拠と線引きは §2.1 に記す。
+本 fork は **2 つの層**を同じリポジトリから配布する。**インフラ層（IPC binary = mechanism）と skills 層（policy）を明確に分離**する。
+
+- **インフラ層（`agmsg` binary）**: エージェント間 IPC のプリミティブ（送る・受け取る・購読する・宛先解決）。この層は **mechanism, not policy** を厳守し、「IPC をどう使うか」を一切作り込まない（§2.1）。
+- **skills 層（`skills/` + `agmsg skills install`）**: その IPC を使う具体的なワークフロー（`dispatch` / `review-loop`）。これは policy であり、binary を `send`/`inbox`/`watch`/`join` 経由でのみ呼ぶ「消費者」として同梱される。分離可能で opt-in（§13）。
+
+当初は提供範囲を IPC インフラだけに絞り skills 層を持たない方針だったが、**delivery 容易化**（協調ワークフロー全体を `go install ...@latest && agmsg skills install` の 2 行で配れる）を理由に skills 層の同梱へ方針変更した（issues/0004）。mechanism-not-policy は放棄したのではなく、**binary コア層に対する原則として温存**している。この境界の根拠と線引きは §2.1、skills 層の詳細は §13 に記す。
 
 ---
 
@@ -20,7 +25,7 @@
 
 | 目標 | 内容 |
 |---|---|
-| **mechanism, not policy** | agmsg-go は**エージェント間 IPC のインフラ（通信路・配送・宛先解決）だけ**を提供する。「その IPC をどう使うか」（レビュー+修正ループ、複数 issue の orchestration 等）は**一切実装せず、利用側に委ねる**。提供物を「最小限のプリミティブ」に保つことを最優先の制約とする。 |
+| **mechanism, not policy（binary コア層の原則）** | **`agmsg` binary** はエージェント間 IPC のプリミティブ（通信路・配送・宛先解決）だけを提供する。「その IPC をどう使うか」を binary には**一切作り込まず**、binary を「最小限のプリミティブ」に保つことを最優先の制約とする。具体的なワークフロー（レビュー+修正ループ等）は binary の外、分離された skills 層として提供する（§13）。 |
 | No daemon 思想の継承 | broker / 常駐 daemon を新設しない。通信路は共有 SQLite ファイルのまま。受信検知の常駐はホストのセッション寿命に預ける構造を維持する。 |
 | 依存最小・単一バイナリ | `sqlite3` CLI を含む外部バイナリ依存を排除し、`go build` で単一バイナリに完結させる。クロスコンパイル可能を維持する。 |
 | SQL 安全性 | 文字列連結による SQL 組み立て（手動エスケープ）を撤廃し、placeholder / prepared statement に置き換える。 |
@@ -34,24 +39,30 @@
 - **メッセージの暗号化・認証・アクセス制御**は対象外（ローカルユーザ前提）。
 - **GUI / TUI** は対象外。CLI サブコマンドのみ。
 - **broker daemon の常設**は非目標（§12 で将来オプションとして言及するに留める）。
-- **オーケストレーション / ワークフロー**は対象外。レビュー+修正ループ、複数 issue の orchestration、エージェント役割の自動割り当て、タスク分配、合意形成プロトコルなどの「使い方」は **agmsg-go に作り込まない**。これらは利用側がプリミティブ（`send` / `inbox` / `watch`）を組み合わせて自由に構築する領域である。
+- **オーケストレーション / ワークフローを `agmsg` binary に作り込むことは非目標**。レビュー+修正ループ、複数 issue の orchestration、役割の自動割り当て、タスク分配、合意形成プロトコルなどの「使い方」は binary に持ち込まない。これらは利用側がプリミティブ（`send` / `inbox` / `watch`）を組み合わせて構築する領域であり、その**代表的な実装の一部（dispatch / review-loop）を skills 層として同梱する**（§13）。skills 層も binary を IPC 経由で呼ぶだけで、binary の非目標を侵さない。
 - **メッセージ本文の意味解釈・スキーマ強制**は対象外。本文は不透明な `TEXT` であり、JSON 構造やコマンド規約を agmsg が定義・検証することはしない（利用側の合意事項）。
 
 ### 2.1 スコープ境界: mechanism, not policy
 
-本プロジェクトの最大の設計判断は「**どこまでを agmsg が持ち、どこからを利用側に委ねるか**」である。agmsg は **transport（運ぶ仕組み）** だけを提供し、**policy（何のために・どんな順序で・誰と運ぶか）** は持たない。
+本プロジェクトの最大の設計判断は「**どこまでを `agmsg` binary が持ち、どこからを policy に委ねるか**」である。binary は **transport（運ぶ仕組み）** だけを提供し、**policy（何のために・どんな順序で・誰と運ぶか）** は持たない。policy のうち代表的なものは、binary の外の **skills 層**として同じリポジトリから同梱する（分離可能・opt-in）。
 
 ```
 ┌─────────────────────────────────────────────────────────┐
-│  利用側が自由に構築する層 (agmsg の対象外 / policy)        │
-│  ・レビュー + 修正ループ                                   │
+│  利用側が自由に構築する層 (binary の対象外 / policy)       │
 │  ・複数 issue の orchestration                            │
 │  ・役割割り当て / タスク分配 / 合意形成                     │
 │  ・本文フォーマットの規約 (JSON 等)                        │
 └──────────────────────▲──────────────────────────────────┘
-                       │ send / inbox / watch を呼ぶだけ
+                       │
 ┌──────────────────────┴──────────────────────────────────┐
-│  agmsg-go が提供する層 (本プロジェクト / mechanism)        │
+│  skills 層 (同梱・分離可能な policy / §13)                 │
+│  ・dispatch     : 別リポで agent を起動し team に auto-join │
+│  ・review-loop  : 逆 agent に反復レビューさせ収束させる     │
+│  ※ skills/ に置き go:embed → `agmsg skills install` で展開 │
+└──────────────────────▲──────────────────────────────────┘
+                       │ send / inbox / watch / join を呼ぶだけ
+┌──────────────────────┴──────────────────────────────────┐
+│  agmsg binary が提供する層 (mechanism / 不可侵のコア)      │
 │  ・宛先解決: (name, team) アイデンティティ                 │
 │  ・送信:     send   (INSERT, placeholder)                │
 │  ・受信:     inbox  (未読 SELECT + 既読化)                │
@@ -62,7 +73,9 @@
                   messages.db (WAL)
 ```
 
-この境界を守る判断基準: **「複数の利用側が別々の使い方をしうる機能」は agmsg に入れない。** 例えば「レビュー担当に振り分ける」のは一つの使い方にすぎず、別の利用側は「全 issue を担当者へ broadcast する」かもしれない。両者が共通して必要とするのは「宛先へ運ぶ」だけなので、agmsg はそれだけを提供する。迷ったら**プリミティブ側に倒さず、利用側に委ねる**。
+この境界を守る判断基準: **「複数の利用側が別々の使い方をしうる機能」は binary に入れない。** 例えば「レビュー担当に振り分ける」のは一つの使い方にすぎず、別の利用側は「全 issue を担当者へ broadcast する」かもしれない。両者が共通して必要とするのは「宛先へ運ぶ」だけなので、binary はそれだけを提供する。迷ったら**binary（mechanism）側に倒さず、policy に委ねる**。
+
+**層分離の不変条件**: skills 層は binary を `send`/`inbox`/`watch`/`join` 経由でのみ呼ぶ。binary 側に skills 固有のロジック（dispatch/review-loop の知識）を一切持ち込まない。`agmsg skills install` も埋め込みファイルを書き出すだけで policy を解釈しない。これにより mechanism の純度を保ったまま policy を同梱できる。
 
 ---
 
@@ -393,4 +406,37 @@ WAL 監視の実地検証とポーリング保険間隔の確定は issue 0002 �
 
 - **bash 版との DB 互換性検証**: 同一 `messages.db` を bash 版・Go 版で混在運用できるかの確認。
 - **`watch` の親プロセス検知の移植性**: 親セッション消滅の検知手段が OS 横断で堅牢かの検証。
+
+---
+
+## 13. skills 層（同梱する policy）
+
+§1 / §2.1 のとおり、本リポジトリは binary（mechanism）に加えて、その IPC を使う具体的なワークフローを **skills 層（policy）** として同梱する。skills 層は **binary と明確に分離**され、binary を `send` / `inbox` / `watch` / `join` 経由でのみ呼ぶ。方針変更の意思決定は issues/0004 に記録する。
+
+### 13.1 同梱する skills
+
+| skill | 役割 | agmsg の使い方 |
+|---|---|---|
+| **dispatch** | 別リポジトリで CLI agent（claude / codex）を git worktree + tmux window で起動する。 | 起動した agent を `agmsg join <team> <name>` で team に auto-join し、親 session から `send` で到達可能にする。 |
+| **review-loop** | 実装済みコードを「逆エージェント」に反復レビューさせ収束させる（実装役は元 session に固定）。 | reviewer → implementer の verdict 通知・完了検知を `agmsg send` / `agmsg inbox` に載せる（旧来の file-marker ポーリングを置換）。 |
+
+両 skill とも、bash 製スクリプト本体（`*.sh`）+ `SKILL.md`（ホスト agent 向け手順書）で構成される。取り込み元は bash dotfiles で、agent 間連絡部分を agmsg に置き換えたうえで脱・個人化した。
+
+### 13.2 tmux は残る / agmsg が置き換えるもの
+
+dispatch / review-loop は **tmux + git worktree** で「対話 agent のプロセスを起こす」。これは agmsg では代替できない（agmsg は IPC であってプロセスランチャーではない）。**agmsg が置き換えるのは agent 間の連絡だけ** —— review-loop の verdict 受け渡しと、dispatch 後の到達性。launcher としての tmux はそのまま残す。
+
+実装上の制約: skills は fish などの対話シェル pane へ `send-keys` でコマンドを送るため、`VAR=val cmd` や `$(...)` のような shell 依存構文を避ける。review-loop の codex verdict 送信は `review-loop.sh notify-verdict`（bash サブコマンド）に委譲し、dispatch の auto-join は dispatch.sh（bash）が `agmsg join` を代行することで、pane シェルの差異を回避する。
+
+### 13.3 配布: go:embed + `agmsg skills install`
+
+skills の source of truth はリポジトリ直下 `skills/`（infra 層 `internal/` と視覚的に分離）。これをモジュールルートの `assets.go`（`package agmsg`）が `//go:embed all:skills` で binary に埋め込む（go:embed は親ディレクトリを辿れないため、トップレベル `skills/` を埋め込むにはルートに埋め込み元 `.go` を置く必要がある）。
+
+`agmsg skills install [--dest <dir>] [--force]` が埋め込みツリーを展開する（既定 dest `~/.claude/skills`、`*.sh` は実行ビット付き、`--force` 無しは既存ファイルを保持）。これにより配布は次の 2 行で完結する:
+
+```sh
+go install github.com/ishii1648/agmsg-go/cmd/agmsg@latest
+agmsg skills install
 ```
+
+`internal/skills.Install` はファイルを書き出すだけで policy を解釈しない（§2.1 の層分離の不変条件）。
