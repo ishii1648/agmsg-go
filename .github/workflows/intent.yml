@@ -1,0 +1,25 @@
+name: Intent
+
+on:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  # PR description must link a related issue (the why lives in issues/), or
+  # explicitly declare N/A for issue-less chores. This keeps the why
+  # discoverable: git blame -> commit -> PR -> issue link -> issue body.
+  pr-issue-link:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require issue link or explicit N/A in PR description
+        env:
+          BODY: ${{ github.event.pull_request.body }}
+        run: |
+          if printf '%s' "$BODY" | grep -Eq 'issues/[0-9]{4}-|\(N/A'; then
+            echo "OK: PR description references an issue or declares N/A."
+          else
+            echo "::error::PR description must link a related issue (issues/NNNN-<cat>-<slug>.md) or state '(N/A — chore)'." >&2
+            exit 1
+          fi
