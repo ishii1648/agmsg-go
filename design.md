@@ -10,6 +10,8 @@
 
 本 fork は、この**通信モデル・通信路・アイデンティティモデル・配信モードといった設計の核を維持したまま**、bash 実装が構造的に抱える弱点（後述）を Go の型システム・標準ライブラリ・テスト機構で解消することを目的とする。
 
+加えて本 fork は、提供範囲を **「エージェント間 IPC のインフラ」だけ**に明確に絞る。レビュー+修正ループや複数 issue の orchestration といった**「IPC をどう使うか」は実装せず、利用側に委ねる**（mechanism, not policy）。この境界の根拠と線引きは §2.1 に記す。
+
 ---
 
 ## 2. 設計目標と非目標
@@ -18,6 +20,7 @@
 
 | 目標 | 内容 |
 |---|---|
+| **mechanism, not policy** | agmsg-go は**エージェント間 IPC のインフラ（通信路・配送・宛先解決）だけ**を提供する。「その IPC をどう使うか」（レビュー+修正ループ、複数 issue の orchestration 等）は**一切実装せず、利用側に委ねる**。提供物を「最小限のプリミティブ」に保つことを最優先の制約とする。 |
 | No daemon 思想の継承 | broker / 常駐 daemon を新設しない。通信路は共有 SQLite ファイルのまま。受信検知の常駐はホストのセッション寿命に預ける構造を維持する。 |
 | 依存最小・単一バイナリ | `sqlite3` CLI を含む外部バイナリ依存を排除し、`go build` で単一バイナリに完結させる。クロスコンパイル可能を維持する。 |
 | SQL 安全性 | 文字列連結による SQL 組み立て（手動エスケープ）を撤廃し、placeholder / prepared statement に置き換える。 |
@@ -31,6 +34,35 @@
 - **メッセージの暗号化・認証・アクセス制御**は対象外（ローカルユーザ前提）。
 - **GUI / TUI** は対象外。CLI サブコマンドのみ。
 - **broker daemon の常設**は非目標（§12 で将来オプションとして言及するに留める）。
+- **オーケストレーション / ワークフロー**は対象外。レビュー+修正ループ、複数 issue の orchestration、エージェント役割の自動割り当て、タスク分配、合意形成プロトコルなどの「使い方」は **agmsg-go に作り込まない**。これらは利用側がプリミティブ（`send` / `inbox` / `watch`）を組み合わせて自由に構築する領域である。
+- **メッセージ本文の意味解釈・スキーマ強制**は対象外。本文は不透明な `TEXT` であり、JSON 構造やコマンド規約を agmsg が定義・検証することはしない（利用側の合意事項）。
+
+### 2.1 スコープ境界: mechanism, not policy
+
+本プロジェクトの最大の設計判断は「**どこまでを agmsg が持ち、どこからを利用側に委ねるか**」である。agmsg は **transport（運ぶ仕組み）** だけを提供し、**policy（何のために・どんな順序で・誰と運ぶか）** は持たない。
+
+```
+┌─────────────────────────────────────────────────────────┐
+│  利用側が自由に構築する層 (agmsg の対象外 / policy)        │
+│  ・レビュー + 修正ループ                                   │
+│  ・複数 issue の orchestration                            │
+│  ・役割割り当て / タスク分配 / 合意形成                     │
+│  ・本文フォーマットの規約 (JSON 等)                        │
+└──────────────────────▲──────────────────────────────────┘
+                       │ send / inbox / watch を呼ぶだけ
+┌──────────────────────┴──────────────────────────────────┐
+│  agmsg-go が提供する層 (本プロジェクト / mechanism)        │
+│  ・宛先解決: (name, team) アイデンティティ                 │
+│  ・送信:     send   (INSERT, placeholder)                │
+│  ・受信:     inbox  (未読 SELECT + 既読化)                │
+│  ・購読:     watch  (id > watermark を stream)           │
+│  ・配送経路: delivery mode + ホストフック用エントリポイント  │
+└──────────────────────▲──────────────────────────────────┘
+                       │ 共有 SQLite ファイルへの読み書き
+                  messages.db (WAL)
+```
+
+この境界を守る判断基準: **「複数の利用側が別々の使い方をしうる機能」は agmsg に入れない。** 例えば「レビュー担当に振り分ける」のは一つの使い方にすぎず、別の利用側は「全 issue を担当者へ broadcast する」かもしれない。両者が共通して必要とするのは「宛先へ運ぶ」だけなので、agmsg はそれだけを提供する。迷ったら**プリミティブ側に倒さず、利用側に委ねる**。
 
 ---
 
@@ -245,29 +277,37 @@ Go 化が変えるのは「常駐をなくすこと」ではなく、**「その
 
 ## 10. CLI サブコマンド構成
 
-オリジナルの各 `*.sh` に対応するサブコマンドを、単一バイナリ `agmsg` のサブコマンドとして再設計する。
+オリジナルの各 `*.sh` に対応するサブコマンドを、単一バイナリ `agmsg` のサブコマンドとして再設計する。ただし §2.1 のスコープ境界に従い、**「最小限の IPC プリミティブ」を先に固め、それ以外は補助／後回し可**として段階を明示する。最小コアだけで「送る・受け取る・購読する」という IPC は完結する。
+
+#### Tier 1: 最小コア（IPC プリミティブ — これだけで通信は成立する）
 
 | オリジナル `*.sh` | Go サブコマンド | 役割 |
 |---|---|---|
 | send.sh | `agmsg send <to> <body>` | メッセージ送信（INSERT、placeholder バインド） |
 | inbox.sh | `agmsg inbox` | 未読メッセージ取得（取得後 `read_at` 更新） |
-| history.sh | `agmsg history [N]` | 履歴（最新 N 件） |
-| join.sh | `agmsg join <team>` | チーム参加（registration 追加） |
-| leave.sh | `agmsg leave <team>` | チーム離脱 |
-| team.sh | `agmsg team` | チーム名簿の表示・操作 |
-| whoami.sh | `agmsg whoami` | 現在のアイデンティティ / 登録状態表示 |
-| identities.sh | `agmsg identities` | 登録一覧 |
-| delivery.sh | `agmsg delivery set <mode>` | 配信モード設定（monitor/turn/both/off） |
-| watch.sh | `agmsg watch` | monitor の長命ストリーム（フックから起動） |
-| check-inbox.sh | `agmsg check-inbox` | turn モードのターン間チェック（フックから起動） |
-| config.sh | `agmsg config` | ユーザ設定の読み書き |
-| reset.sh | `agmsg reset` | DB / 状態のリセット |
-| rename.sh | `agmsg rename <new>` | 自エージェント名の変更 |
-| rename-team.sh | `agmsg rename-team <new>` | チーム名の変更 |
-| actas.sh | `agmsg actas <name>` | 役割（name）の多重追加 |
-| drop.sh | `agmsg drop <name>` | 役割の除去 |
+| watch.sh | `agmsg watch` | `id > watermark` を stream する購読（フックからも起動） |
+| join.sh / leave.sh | `agmsg join <team>` / `agmsg leave <team>` | 宛先解決の前提となるチーム参加 / 離脱 |
+| whoami.sh | `agmsg whoami` | 自アイデンティティ表示（送信者の確定に必要） |
 
-ホストフック（SessionStart / Stop）から呼ぶエントリポイント（`watch` / `check-inbox`）も同じバイナリのサブコマンドにすることで、配布物は 1 つで完結する。
+#### Tier 2: 補助（運用に要るが IPC の本質ではない）
+
+| オリジナル `*.sh` | Go サブコマンド | 役割 |
+|---|---|---|
+| history.sh | `agmsg history [N]` | 履歴（最新 N 件） |
+| check-inbox.sh | `agmsg check-inbox` | turn モードのターン間チェック（フックから起動） |
+| delivery.sh | `agmsg delivery set <mode>` | 配信モード設定（monitor/turn/both/off） |
+| team.sh / identities.sh | `agmsg team` / `agmsg identities` | チーム名簿 / 登録一覧の表示 |
+| config.sh | `agmsg config` | ユーザ設定の読み書き |
+
+#### Tier 3: 任意（あると便利だが初期実装では後回し可）
+
+| オリジナル `*.sh` | Go サブコマンド | 役割 |
+|---|---|---|
+| reset.sh | `agmsg reset` | DB / 状態のリセット |
+| rename.sh / rename-team.sh | `agmsg rename` / `agmsg rename-team` | 名前 / チーム名の変更 |
+| actas.sh / drop.sh | `agmsg actas <name>` / `agmsg drop <name>` | 役割（name）の多重追加 / 除去 |
+
+ホストフック（SessionStart / Stop）から呼ぶエントリポイント（`watch` / `check-inbox`）も同じバイナリのサブコマンドにすることで、配布物は 1 つで完結する。**いずれのサブコマンドにもオーケストレーション的判断（誰にどう振り分けるか等）は持ち込まない**——それらは利用側が Tier 1 を組み合わせて実装する（§2.1）。なお actas/drop が役割を「多重に持てる」機能を提供するに留め、その役割をどう使い分けるか（例: レビュー役と実装役の演じ分け）は利用側の policy である。
 
 ---
 

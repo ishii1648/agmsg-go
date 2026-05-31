@@ -6,6 +6,12 @@
 
 Claude Code / Codex / Gemini CLI / Antigravity などの CLI AI エージェント同士が、共有 SQLite ファイルを介してメッセージをやり取りします。中央プロセス（broker / daemon）もネットワークも持たず、各エージェントが同じ DB ファイルに直接読み書きすることで通信が成立します。設計思想は **"No daemon, no network, no complexity"**。
 
+## スコープ: IPC インフラだけを提供する (mechanism, not policy)
+
+agmsg-go が提供するのは **エージェント間 IPC のインフラ（送る・受け取る・購読する・宛先を解決する）** だけです。その IPC を**どう使うか**——レビュー+修正ループ、複数 issue の orchestration、役割割り当て、合意形成など——は **agmsg-go には実装せず、利用側が `send` / `inbox` / `watch` を組み合わせて自由に構築します**。
+
+これは「最小限のプリミティブに留める」という意図的な制約です。「複数の利用側が別々の使い方をしうる機能」はツール側に入れません。詳細は [design.md §2.1](./design.md) を参照してください。
+
 ## ステータス
 
 🚧 **設計フェーズ**です。実装はこれから着手します。設計の詳細は [design.md](./design.md) を参照してください。
@@ -27,25 +33,23 @@ Claude Code / Codex / Gemini CLI / Antigravity などの CLI AI エージェン�
 
 ## サブコマンド（暫定）
 
-すべて単一バイナリ `agmsg` のサブコマンドです。ホストフック（SessionStart / Stop）から呼ぶエントリポイントも同じバイナリに含まれます。
+すべて単一バイナリ `agmsg` のサブコマンドです。ホストフック（SessionStart / Stop）から呼ぶエントリポイントも同じバイナリに含まれます。これらは IPC プリミティブであり、組み合わせ方（オーケストレーション）は利用側が決めます。
+
+**Tier 1: 最小コア**（これだけで「送る・受け取る・購読する」が成立）
 
 | コマンド | 役割 |
 |---|---|
 | `agmsg send <to> <body>` | メッセージ送信 |
 | `agmsg inbox` | 未読メッセージの取得 |
-| `agmsg history [N]` | 履歴（最新 N 件） |
-| `agmsg join <team>` / `agmsg leave <team>` | チーム参加 / 離脱 |
-| `agmsg team` | チーム名簿の表示・操作 |
-| `agmsg whoami` / `agmsg identities` | アイデンティティ / 登録状態の表示 |
-| `agmsg delivery set <mode>` | 配信モード設定（`monitor` / `turn` / `both` / `off`） |
-| `agmsg watch` | monitor モードの長命ストリーム（フックから起動） |
-| `agmsg check-inbox` | turn モードのターン間チェック（フックから起動） |
-| `agmsg config` | ユーザ設定の読み書き |
-| `agmsg actas <name>` / `agmsg drop <name>` | 役割（name）の多重追加 / 除去 |
-| `agmsg rename <new>` / `agmsg rename-team <new>` | 名前 / チーム名の変更 |
-| `agmsg reset` | DB / 状態のリセット |
+| `agmsg watch` | `id > watermark` の購読ストリーム（フックからも起動） |
+| `agmsg join <team>` / `agmsg leave <team>` | チーム参加 / 離脱（宛先解決の前提） |
+| `agmsg whoami` | 自アイデンティティの表示 |
 
-詳細なコマンド対応表は [design.md §10](./design.md) を参照してください。
+**Tier 2: 補助** — `agmsg history [N]` / `agmsg check-inbox` / `agmsg delivery set <mode>`（`monitor`/`turn`/`both`/`off`）/ `agmsg team` / `agmsg identities` / `agmsg config`
+
+**Tier 3: 任意（初期実装では後回し可）** — `agmsg reset` / `agmsg rename` / `agmsg rename-team` / `agmsg actas <name>` / `agmsg drop <name>`
+
+詳細なコマンド対応表と Tier 分類は [design.md §10](./design.md) を参照してください。
 
 ## 配信モード
 
