@@ -134,6 +134,24 @@ func TestFlagRequiresValue(t *testing.T) {
 	}
 }
 
+// TestUnknownFlagRejected はフラグ typo の黙殺による誤送信を防ぐ。
+func TestUnknownFlagRejected(t *testing.T) {
+	t.Setenv("AGMSG_TEAM", "alpha")
+	e, _ := newEnv(t)
+	run(t, e, "join", "alpha", "alice")
+	// `--teem` は `--team` の typo。黙って無視して alpha 宛てにせず、エラーにする。
+	if err := Run(context.Background(), e, []string{"send", "bob", "hi", "--teem", "beta"}); err == nil {
+		t.Error("unknown flag --teem must error, not be silently ignored")
+	}
+	// 正しいフラグは通る。
+	run(t, e, "send", "bob", "hi", "--team", "alpha")
+
+	// サブコマンドごとに許可集合が異なる: whoami は --team を受理しない。
+	if err := Run(context.Background(), e, []string{"whoami", "--team", "alpha"}); err == nil {
+		t.Error("whoami should reject --team")
+	}
+}
+
 func TestUnknownSubcommand(t *testing.T) {
 	e, _ := newEnv(t)
 	if err := Run(context.Background(), e, []string{"frobnicate"}); err == nil {

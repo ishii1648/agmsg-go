@@ -96,6 +96,22 @@ func parseFlags(args []string) (flags, error) {
 // get はフラグ値を返す。フラグが明示指定されていれば（空文字含め）それを優先し、
 // 未指定のときのみ env → default にフォールバックする。明示指定を env で上書き
 // しないことで挙動を予測可能にする。
+// checkAllowed は指定サブコマンドが受理しないフラグが渡されたらエラーにする。
+// 未知フラグ（typo 含む）を黙って無視すると、`--teem beta`(=`--team` のつもり)が
+// 無視され env/自動解決で別宛てに化けるため、明示的に弾く。
+func (f flags) checkAllowed(allowed ...string) error {
+	set := make(map[string]struct{}, len(allowed))
+	for _, a := range allowed {
+		set[a] = struct{}{}
+	}
+	for k := range f.opts {
+		if _, ok := set[k]; !ok {
+			return fmt.Errorf("unknown flag --%s", k)
+		}
+	}
+	return nil
+}
+
 func (f flags) get(key, env, def string) string {
 	if v, ok := f.opts[key]; ok {
 		return v
@@ -208,6 +224,24 @@ func Run(ctx context.Context, e Env, args []string) error {
 		return err
 	}
 
+	// 各サブコマンドが受理するフラグ。未知フラグはここで弾く。
+	allowed := map[string][]string{
+		"send":   {"from", "team"},
+		"inbox":  {"name", "team"},
+		"watch":  {"name", "team", "interval"},
+		"join":   {"name", "type", "project"},
+		"leave":  {"name", "type", "project"},
+		"whoami": {"type", "project"},
+	}
+	allow, known := allowed[sub]
+	if !known {
+		printUsage(e.Stderr)
+		return fmt.Errorf("unknown subcommand %q", sub)
+	}
+	if err := f.checkAllowed(allow...); err != nil {
+		return err
+	}
+
 	switch sub {
 	case "send":
 		return cmdSend(ctx, e, l, f)
@@ -222,6 +256,7 @@ func Run(ctx context.Context, e Env, args []string) error {
 	case "whoami":
 		return cmdWhoami(ctx, e, l, f)
 	default:
+		// allowed マップと switch は同期している（到達しない）。
 		printUsage(e.Stderr)
 		return fmt.Errorf("unknown subcommand %q", sub)
 	}
