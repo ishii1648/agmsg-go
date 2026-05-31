@@ -34,6 +34,13 @@ const (
 
 const defaultType = "claude-code"
 
+// boolFlags は値を取らないフラグ。これらは `--key` 単独で true を意味し、次トークンを
+// 値として消費しない。Tier 1 の全フラグは値必須（footgun 防止、TestFlagRequiresValue）
+// だが、skills install の --force のような真偽フラグはここに登録して例外扱いする。
+var boolFlags = map[string]struct{}{
+	"force": {},
+}
+
 // tsLayout は created_at / read_at と揃えた ISO-8601 (UTC)。
 const tsLayout = "2006-01-02T15:04:05Z"
 
@@ -80,7 +87,12 @@ func parseFlags(args []string) (flags, error) {
 				f.opts[key[:eq]] = key[eq+1:]
 				continue
 			}
-			// 次トークンを値として消費（次がフラグでない限り）。Tier 1 の全フラグは
+			// 真偽フラグ（--force 等）は値を取らず、次トークンも消費しない。
+			if _, isBool := boolFlags[key]; isBool {
+				f.opts[key] = "true"
+				continue
+			}
+			// 次トークンを値として消費（次がフラグでない限り）。Tier 1 の他フラグは
 			// 値必須なので、値が無い `--team` 単独はエラーにする。これを空文字として
 			// 受理すると get が env/default にフォールバックし、`--team`(値なし)が
 			// AGMSG_TEAM 宛てに化けて誤送信になる。
@@ -240,6 +252,7 @@ func Run(ctx context.Context, e Env, args []string) error {
 		"join":   {"name", "type", "project"},
 		"leave":  {"name", "type", "project"},
 		"whoami": {"type", "project"},
+		"skills": {"dest", "force"},
 	}
 	allow, known := allowed[sub]
 	if !known {
@@ -263,6 +276,8 @@ func Run(ctx context.Context, e Env, args []string) error {
 		return cmdLeave(ctx, e, l, f)
 	case "whoami":
 		return cmdWhoami(ctx, e, l, f)
+	case "skills":
+		return cmdSkills(ctx, e, l, f)
 	default:
 		// allowed マップと switch は同期している（到達しない）。
 		printUsage(e.Stderr)
@@ -280,6 +295,8 @@ Usage:
   agmsg join  <team> <name> [--type <type>] [--project <path>]
   agmsg leave <team> <name> [--type <type>] [--project <path>]
   agmsg whoami            [--type <type>] [--project <path>]
+  agmsg skills install    [--dest <dir>] [--force]
+  agmsg skills list
   agmsg version
 
 識別子 (name, team) はフラグ／環境変数 (AGMSG_NAME, AGMSG_TEAM, AGMSG_TYPE,

@@ -3,6 +3,8 @@ package cli
 import (
 	"bytes"
 	"context"
+	"os"
+	"path/filepath"
 	"strings"
 	"testing"
 	"time"
@@ -180,6 +182,59 @@ func TestWatchRejectsNonPositiveInterval(t *testing.T) {
 		if err := Run(context.Background(), e, []string{"watch", "--interval", v}); err == nil {
 			t.Errorf("watch --interval %q should error", v)
 		}
+	}
+}
+
+// TestSkillsInstall は埋め込み skills を dest へ展開し、*.sh が実行可能で
+// SKILL.md が同梱されることを検証する（go:embed → install の結線確認）。
+func TestSkillsInstall(t *testing.T) {
+	e, out := newEnv(t)
+	dest := t.TempDir()
+	run(t, e, "skills", "install", "--dest", dest)
+
+	for _, rel := range []string{
+		"dispatch/dispatch.sh", "dispatch/SKILL.md",
+		"review-loop/review-loop.sh", "review-loop/SKILL.md",
+	} {
+		if _, err := os.Stat(filepath.Join(dest, rel)); err != nil {
+			t.Errorf("expected installed file %s: %v", rel, err)
+		}
+	}
+	if fi, err := os.Stat(filepath.Join(dest, "dispatch", "dispatch.sh")); err == nil {
+		if fi.Mode().Perm()&0o111 == 0 {
+			t.Errorf("dispatch.sh should be executable, got %v", fi.Mode().Perm())
+		}
+	}
+	if !strings.Contains(out.String(), "installed skills to "+dest) {
+		t.Errorf("missing install summary:\n%s", out.String())
+	}
+}
+
+// TestSkillsForceFlag は値を取らない --force が parse エラーにならず、
+// 再 install で既存ファイルを上書きすることを検証する。
+func TestSkillsForceFlag(t *testing.T) {
+	e, _ := newEnv(t)
+	dest := t.TempDir()
+	run(t, e, "skills", "install", "--dest", dest)
+	target := filepath.Join(dest, "dispatch", "SKILL.md")
+	if err := os.WriteFile(target, []byte("EDIT\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	run(t, e, "skills", "install", "--dest", dest, "--force")
+	got, _ := os.ReadFile(target)
+	if string(got) == "EDIT\n" {
+		t.Error("--force should have overwritten the edited file")
+	}
+}
+
+// TestSkillsUnknownAction は未知アクションがエラーになることを検証する。
+func TestSkillsUnknownAction(t *testing.T) {
+	e, _ := newEnv(t)
+	if err := Run(context.Background(), e, []string{"skills", "frobnicate"}); err == nil {
+		t.Error("unknown skills action should error")
+	}
+	if err := Run(context.Background(), e, []string{"skills"}); err == nil {
+		t.Error("skills without action should error")
 	}
 }
 
