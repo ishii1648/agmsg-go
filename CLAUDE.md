@@ -25,6 +25,10 @@
 
 Contextual Commits を使用。Conventional Commits プレフィックス + 構造化されたアクション行でコミットの意図を記録する。
 
+### PR 作成
+
+**PR description の冒頭で必ず関連 issue にリンクする。** `.github/workflows/intent.yml`（`Intent` チェック）が PR description 内に `issues/NNNN-<cat>-<slug>.md`（close を伴う場合は `issues/closed/NNNN-...`）のリンク、または issue を伴わない軽微な変更を示す `(N/A — chore)` の記載を必須化しており、**どちらも無いと PR の CI が落ちる**（コミットメッセージではなく PR 本文を見る点に注意）。フォームは `.github/pull_request_template.md` に従い、「なぜ」「方針」「却下案」は issue / commit body 側に置いて description は薄く保つ。詳細は AGENTS.md「issues について」。
+
 ### ブランチ命名
 
 `feat/`, `fix/`, `docs/`, `chore/` + kebab-case（例: `feat/store-placeholder-insert`）
