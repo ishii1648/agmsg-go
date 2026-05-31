@@ -49,17 +49,19 @@ allowed-tools: Bash, Read, Edit, Write
 
 - `git rev-parse --show-toplevel` で `REPO_ROOT` を取得。
 - `tmux display-message -p '#{session_name}'` が成功すること（tmux 内であること）。
-- `date +%Y%m%d-%H%M%S` で `SESSION_ID=reviewloop-<stamp>` を生成。これがそのまま agmsg の team 名になる（per-session の ephemeral team。実装役=`implementer` / レビュアー=`reviewer` という固定 identity を明示フラグで使うため `agmsg join` は不要）。
-- ユーザーがレビュー観点を指示している場合のみ、**Write ツール**でその観点を `REPO_ROOT/.outputs/claude/review-loop/<SESSION_ID>/note.md` に書く（任意。なければ作らない）。
+- **`SESSION_ID` を自分で組み立てない**。round 1 の `review-once`（Step 3）が `--session-id` 省略時に衝突不能な値（`reviewloop-<repo>-<utc>-<rand>`）を採番して `SESSION_ID:` 行で返すので、**その値を控えて以降（round2+ / wait-review / cleanup）で再利用する**。`date` ベースの手組みは秒解像度で並列 worktree / 同一秒起動と衝突するため禁止（→ [[issues/closed/0006-implementation-review-loop-parallel-safety]]）。`SESSION_ID` はそのまま agmsg の team 名になる（per-session の ephemeral team。実装役=`implementer` / レビュアー=`reviewer` の固定 identity を明示フラグで使うため `agmsg join` は不要）。
+- ユーザーがレビュー観点を指示している場合のみ、**Write ツール**でその観点を一時ファイル（例 `REPO_ROOT/.outputs/claude/review-loop/note-<任意>.md`）に書き、Step 3 で `--note` に渡す（任意。なければ作らない。`SESSION_ID` 採番前なので note のパスに `SESSION_ID` を含めなくてよい）。
 
 ### Step 3: round=1 でレビューを起動（Bash ツール）
 
 ```bash
-bash $SCRIPT review-once "<REPO_ROOT>" --session-id "<SESSION_ID>" --reviewer "<REVIEWER>" --round 1 \
-  [--base <ref>] [--note "<REPO_ROOT>/.outputs/claude/review-loop/<SESSION_ID>/note.md"]
+bash $SCRIPT review-once "<REPO_ROOT>" --reviewer "<REVIEWER>" --round 1 \
+  [--base <ref>] [--note "<NOTE_FILE>"]
 ```
 
-`--base` / `--note` はユーザー指示があるときだけ付ける。出力の `REVIEW_OUT`（= `round-1-review.md` のパス）を控える。
+`--session-id` は付けない（review-once が採番する）。`--base` / `--note` はユーザー指示があるときだけ付ける。出力から **`SESSION_ID`（以降ずっと使う）** と `REVIEW_OUT`（= `round-1-review.md` のパス）を控える。
+
+**二重起動しないこと**: 出力 `STATUS` が `STARTED` のときだけレビュアーが起動した。`ALREADY_RUNNING`（その round のレビュアーが既に稼働中）や `LAUNCH_IN_PROGRESS`（launch が並行実行中）が返ったら、**review-once を再実行せず**既存 pane の完了を待つ（Step 4 へ）。round ごとに `review-once` を呼ぶのは**ちょうど一度**。
 
 ### Step 4: レビュー完了を待つ（Bash ツールを `run_in_background: true` で）
 
@@ -67,7 +69,7 @@ bash $SCRIPT review-once "<REPO_ROOT>" --session-id "<SESSION_ID>" --reviewer "<
 bash $SCRIPT wait-review "<REPO_ROOT>" --session-id "<SESSION_ID>" --round <N>
 ```
 
-**必ず `run_in_background: true` で実行する**（最大 900s ブロックするため）。レビュアーは隣の pane で走っており、レビュー完了時に `agmsg send implementer "REVIEW_RESULT: <verdict>" --team <SESSION_ID>` で verdict を送る。`wait-review` は `agmsg inbox --name implementer --team <SESSION_ID>` をポーリングしてそれを受信するとこのコマンドが終了し、あなたが再開される。終了時の出力から `VERDICT`（`APPROVED` / `CHANGES_REQUESTED`）と `STATUS`（`TIMEOUT` なら失敗）を読む。レビュー本文は従来どおり `round-N-review.md` に書かれる（指摘内容のキャリア）。
+**必ず `run_in_background: true` で実行する**（最大 900s ブロックするため）。レビュアーは隣の pane で走っており、レビュー完了時に `agmsg send implementer-r<round> "REVIEW_RESULT: <verdict> round=<round>" --team <SESSION_ID>` で verdict を送る（受信 identity は round ごとに分離＝残留・二重起動の verdict を取り違えない）。`wait-review` は `agmsg inbox --name implementer-r<round> --team <SESSION_ID>` をポーリングしてそれを受信するとこのコマンドが終了し、あなたが再開される。終了時の出力から `VERDICT`（`APPROVED` / `CHANGES_REQUESTED`）と `STATUS`（`TIMEOUT` なら失敗）を読む。`CONSISTENCY` が `OK` 以外（`INCONSISTENT(...)`）なら、受信 verdict と `round-N-review.md` の実体が食い違っている＝二重起動 / クロストークの兆候なので、`round-N-review.md` と pane を確認してから先へ進む。レビュー本文は従来どおり `round-N-review.md` に書かれる（指摘内容のキャリア）。
 
 ### Step 5: VERDICT に応じて分岐
 
@@ -101,4 +103,5 @@ reviewer window と manifest を削除する。**元セッションのある tmu
 - レビュアーが codex のときは `-s read-only` sandbox でコード変更が機構的に禁止される。レビュアーが claude になるのは**元セッションが codex のときのみ**で、この場合 sandbox 強制はなく「コードを変更しない」というプロンプト指示に依存する。
 - claude をレビュアーに使うとき `claude -p` / `--print` は使わない（subscription 課金を維持）。各ラウンド stateless で新規 session-id で起動し、前回レビューはプロンプトに同梱する。
 - 現在の worktree（レビュー対象ブランチ）上で動き、新規 worktree は作らない。
-- 完了検知・収束判定は agmsg メッセージ（reviewer → implementer の `REVIEW_RESULT` 本文）で行う。codex レビュアーは `review-once` が exec 終了後に `notify-verdict` を連鎖して `round-N-review.md` から verdict を抽出し送信する。claude レビュアーは自身がプロンプト指示に従い最後に `agmsg send` する。レビュー本文（`round-N-review.md`）は指摘内容の参照用に残す。
+- 完了検知・収束判定は agmsg メッセージ（reviewer → `implementer-r<round>` の `REVIEW_RESULT` 本文）で行う。codex レビュアーは `review-once` が exec 終了後に `notify-verdict` を連鎖して `round-N-review.md` から verdict を抽出し送信する。claude レビュアーは自身がプロンプト指示に従い最後に `agmsg send` する。レビュー本文（`round-N-review.md`）は指摘内容の参照用に残す。
+- **並列実行安全**: agmsg DB（`~/.agents/skills/agmsg`）と manifest（`~/.review-loop/`）は全 worktree で共有されるため、`SESSION_ID` を team/識別キーとして一意にすることで run どうしを分離する。`SESSION_ID` は review-once が衝突不能に採番する（手組み禁止）。同一 run 内の同一 round 二重起動は review-once の (session, round) ロックと生存 pane 検出で機構的に抑止される。受信 inbox は round 別 identity（`implementer-r<round>`）で分離する。これらの設計判断は [[issues/closed/0006-implementation-review-loop-parallel-safety]] に記録。
