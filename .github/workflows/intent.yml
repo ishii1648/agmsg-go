@@ -17,7 +17,10 @@ jobs:
         env:
           BODY: ${{ github.event.pull_request.body }}
         run: |
-          if printf '%s' "$BODY" | grep -Eq 'issues/[0-9]{4}-|\(N/A'; then
+          # closed/ pending/ も許容する: issue は修正 PR の最終コミットで
+          # issues/closed/ へ git mv される運用（AGENTS.md）のため、close を伴う
+          # PR のリンクは issues/closed/NNNN- の形になる。
+          if printf '%s' "$BODY" | grep -Eq 'issues/(closed/|pending/)?[0-9]{4}-|\(N/A'; then
             echo "OK: PR description references an issue or declares N/A."
           else
             echo "::error::PR description must link a related issue (issues/NNNN-<cat>-<slug>.md) or state '(N/A — chore)'." >&2

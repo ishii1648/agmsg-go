@@ -1,0 +1,30 @@
+name: Test
+
+on:
+  pull_request:
+  push:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  # OS matrix で go test を回す。受信検知（internal/watch）は fsnotify を介して
+  # OS 依存の通知機構（inotify / FSEvents）に乗るため、WAL ディレクトリ監視の
+  # 発火を実機で検証する（issues/0002）。windows は別 issue で扱う既存テスト
+  # （store の ?/# を含むパス）が Windows のファイル名制約で落ちるため一旦除外。
+  test:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - name: go vet
+        run: go vet ./...
+      - name: go test
+        run: go test -race ./...
