@@ -31,6 +31,28 @@ agmsg-go が提供するのは **エージェント間 IPC のインフラ（送
 
 > 補足: fsnotify 採用の主眼は「遅延短縮」ではなく**アイドル効率**です。受信の数秒の遅延は LLM の推論時間に埋もれるため、本質的な利得は「何も来ない時に何もしない」ことにあります。詳細は [design.md §8](./design.md) を参照。
 
+## インストール
+
+### go install（推奨）
+
+ソースからビルドする。go ツールチェーンが生成するバイナリには macOS の quarantine 属性が付かないため、**Gatekeeper 警告なし**で実行できる。
+
+```sh
+go install github.com/ishii1648/agmsg-go/cmd/agmsg@latest
+```
+
+`make install` でも同じくソースビルドで `~/.local/bin/agmsg` に配置できる（`PREFIX` で変更可）。
+
+### リリースバイナリをダウンロード
+
+[Releases](https://github.com/ishii1648/agmsg-go/releases) から OS / arch 別の tar.gz を取得する。リリースバイナリは**未署名**のため、macOS では初回実行時に Gatekeeper 警告（「開発元を検証できません」）が出る。次で解除する:
+
+```sh
+xattr -d com.apple.quarantine ./agmsg   # quarantine 属性を外す
+```
+
+または Finder で右クリック →「開く」。コード署名 / notarization は導入していない（CLI には過剰なため）。警告を避けたい場合は上記 `go install` / `make install` を使う。
+
 ## サブコマンド（暫定）
 
 すべて単一バイナリ `agmsg` のサブコマンドです。ホストフック（SessionStart / Stop）から呼ぶエントリポイントも同じバイナリに含まれます。これらは IPC プリミティブであり、組み合わせ方（オーケストレーション）は利用側が決めます。
