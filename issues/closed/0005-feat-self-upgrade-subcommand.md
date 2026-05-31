@@ -1,6 +1,7 @@
 ---
 decision_type: implementation
 tags: [distribution, upgrade, github-releases, cli]
+closed_at: 2026-05-31
 ---
 
 # agmsg upgrade サブコマンドで自己更新を実装する
