@@ -19,11 +19,28 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/ishii1648/agmsg-go/internal/identity"
 	"github.com/ishii1648/agmsg-go/internal/paths"
 )
+
+// ValidateTeam は team 名が単一の安全なパス要素であることを保証する。
+// team は teams/<team>/config.json のディレクトリ名になるため、未検証だと
+// "../" やパス区切りで AGMSG_HOME 外の任意 config を読み書きできてしまう。
+// 入口（Join / Leave / LoadTeam）で弾く。
+func ValidateTeam(team string) error {
+	if team == "" || team == "." || team == ".." ||
+		strings.ContainsRune(team, '/') ||
+		strings.ContainsRune(team, filepath.Separator) ||
+		strings.ContainsRune(team, '\x00') ||
+		filepath.Base(team) != team {
+		return fmt.Errorf("invalid team name %q (must be a single path segment)", team)
+	}
+	return nil
+}
 
 // AgentEntry は config.json 内の 1 エージェント分の登録情報。
 type AgentEntry struct {
@@ -40,6 +57,9 @@ type TeamConfig struct {
 // LoadTeam は指定チームの config を読み込む。未作成なら ok=false を返す
 // （エラーではない）。
 func LoadTeam(l paths.Layout, team string) (TeamConfig, bool, error) {
+	if err := ValidateTeam(team); err != nil {
+		return TeamConfig{}, false, err
+	}
 	b, err := os.ReadFile(l.TeamConfigPath(team))
 	if errors.Is(err, os.ErrNotExist) {
 		return TeamConfig{}, false, nil

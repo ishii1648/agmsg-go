@@ -76,6 +76,29 @@ func TestJoinInvalidType(t *testing.T) {
 	}
 }
 
+// TestTeamNameTraversal はパストラバーサルを試みる team 名が全入口で弾かれることを
+// 検証する（AGMSG_HOME 外への読み書き防止）。
+func TestTeamNameTraversal(t *testing.T) {
+	l := tempLayout(t)
+	reg := identity.Registration{Type: "codex", Project: "/x"}
+	bad := []string{"../escape", "a/b", "..", ".", "", "foo/../bar"}
+	for _, team := range bad {
+		if _, err := Join(l, team, "bob", reg); err == nil {
+			t.Errorf("Join(team=%q) must error", team)
+		}
+		if _, _, err := LoadTeam(l, team); err == nil {
+			t.Errorf("LoadTeam(team=%q) must error", team)
+		}
+		if _, err := Leave(l, team, "bob", reg); err == nil {
+			t.Errorf("Leave(team=%q) must error", team)
+		}
+	}
+	// 正常な team 名は通る。
+	if err := ValidateTeam("alpha-1"); err != nil {
+		t.Errorf("ValidateTeam(alpha-1) = %v, want nil", err)
+	}
+}
+
 func TestLeave(t *testing.T) {
 	l := tempLayout(t)
 	regA := identity.Registration{Type: "codex", Project: "/repo/a"}

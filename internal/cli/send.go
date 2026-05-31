@@ -11,8 +11,11 @@ import (
 // 送信者 (from, team) は --from/--team または現在の (type, project) から解決する。
 // body は placeholder バインドで INSERT され、内容によらず安全 (design.md §5.1)。
 func cmdSend(ctx context.Context, e Env, l paths.Layout, f flags) error {
-	if len(f.pos) < 2 {
-		return fmt.Errorf("usage: agmsg send <to> <body>")
+	// ちょうど 2 個（<to> <body>）を要求する。3 個目以降を無言で捨てると
+	// `agmsg send bob hello world` が "hello" だけ送るデータ欠落になるため、
+	// 余剰はエラーにして本文の引用を促す。
+	if len(f.pos) != 2 {
+		return fmt.Errorf("usage: agmsg send <to> <body> (quote the body if it contains spaces)")
 	}
 	to, body := f.pos[0], f.pos[1]
 

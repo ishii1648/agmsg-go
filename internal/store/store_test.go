@@ -98,6 +98,59 @@ func TestTakeUnread(t *testing.T) {
 }
 
 // TestMaxIDAndSince は watch の watermark 動作を検証する。
+// TestTakeUnreadConcurrent は同一宛ての inbox が並行実行されても、各メッセージが
+// ちょうど 1 回だけ claim される（二重取得なし）ことを検証する。
+func TestTakeUnreadConcurrent(t *testing.T) {
+	s := openTemp(t)
+	ctx := context.Background()
+
+	const n = 50
+	for i := 0; i < n; i++ {
+		if _, err := s.Insert(ctx, "t", "alice", "bob", "msg"); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	const workers = 8
+	results := make(chan []Message, workers)
+	errs := make(chan error, workers)
+	start := make(chan struct{})
+	for w := 0; w < workers; w++ {
+		go func() {
+			<-start
+			msgs, err := s.TakeUnread(ctx, "t", "bob", "2026-01-01T00:00:00Z")
+			if err != nil {
+				errs <- err
+				return
+			}
+			results <- msgs
+		}()
+	}
+	close(start)
+
+	seen := map[int64]int{}
+	total := 0
+	for w := 0; w < workers; w++ {
+		select {
+		case err := <-errs:
+			t.Fatalf("concurrent TakeUnread: %v", err)
+		case msgs := <-results:
+			for _, m := range msgs {
+				seen[m.ID]++
+				total++
+			}
+		}
+	}
+	if total != n {
+		t.Fatalf("claimed %d messages total, want %d", total, n)
+	}
+	for id, c := range seen {
+		if c != 1 {
+			t.Errorf("message %d claimed %d times, want exactly 1", id, c)
+		}
+	}
+}
+
 func TestMaxIDAndSince(t *testing.T) {
 	s := openTemp(t)
 	ctx := context.Background()

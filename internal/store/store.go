@@ -13,6 +13,7 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"sort"
 
 	_ "modernc.org/sqlite"
 )
@@ -99,21 +100,21 @@ func (s *Store) Unread(ctx context.Context, team, to string) ([]Message, error) 
 	return scanRows(rows)
 }
 
-// TakeUnread は (team, to) 宛ての未読を取得し、同一トランザクション内で read_at を
-// 埋めて返す。取得と既読化の間に新着が割り込んでも取りこぼし・二重既読が起きない
-// よう、対象 id を確定してから UPDATE する。inbox サブコマンドの実体。
+// TakeUnread は (team, to) 宛ての未読を取得し、同時に read_at を埋めて返す。
+// inbox サブコマンドの実体。
+//
+// 取得と既読化を UPDATE ... RETURNING の単一文で原子的に行う。SELECT→UPDATE の
+// 2 段だと、同一宛ての inbox が並行実行されたとき両者が同じ行を SELECT して二重
+// 取得しうる。UPDATE が WHERE read_at IS NULL で行をその場で claim し、RETURNING で
+// 確定分のみ返すことでこの窓を構造的に消す（SQLite は書き込みを直列化するため、
+// 後発の inbox は read_at が既に埋まった行を 0 件として返す）。
+// RETURNING は順序を保証しないため、id 昇順に整えてから返す。
 func (s *Store) TakeUnread(ctx context.Context, team, to, readAt string) ([]Message, error) {
-	tx, err := s.db.BeginTx(ctx, nil)
-	if err != nil {
-		return nil, err
-	}
-	defer tx.Rollback()
-
-	rows, err := tx.QueryContext(ctx,
-		`SELECT `+selectCols+` FROM messages
+	rows, err := s.db.QueryContext(ctx,
+		`UPDATE messages SET read_at = ?
 		 WHERE team = ? AND to_agent = ? AND read_at IS NULL
-		 ORDER BY id`,
-		team, to)
+		 RETURNING `+selectCols,
+		readAt, team, to)
 	if err != nil {
 		return nil, err
 	}
@@ -121,17 +122,7 @@ func (s *Store) TakeUnread(ctx context.Context, team, to, readAt string) ([]Mess
 	if err != nil {
 		return nil, err
 	}
-	for i := range msgs {
-		if _, err := tx.ExecContext(ctx,
-			`UPDATE messages SET read_at = ? WHERE id = ?`,
-			readAt, msgs[i].ID); err != nil {
-			return nil, err
-		}
-		msgs[i].ReadAt = sql.NullString{String: readAt, Valid: true}
-	}
-	if err := tx.Commit(); err != nil {
-		return nil, err
-	}
+	sort.Slice(msgs, func(i, j int) bool { return msgs[i].ID < msgs[j].ID })
 	return msgs, nil
 }
 

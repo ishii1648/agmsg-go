@@ -111,3 +111,45 @@ func TestUnknownSubcommand(t *testing.T) {
 		t.Error("unknown subcommand should error")
 	}
 }
+
+// TestSendRejectsExtraArgs は本文の暗黙破棄（データ欠落）を防ぐため、
+// 位置引数がちょうど 2 個でないと send が失敗することを検証する。
+func TestSendRejectsExtraArgs(t *testing.T) {
+	e, _ := newEnv(t)
+	run(t, e, "join", "alpha", "alice")
+	if err := Run(context.Background(), e, []string{"send", "bob", "hello", "world"}); err == nil {
+		t.Error("send with 3 positional args should error (avoid silent body truncation)")
+	}
+	if err := Run(context.Background(), e, []string{"send", "bob"}); err == nil {
+		t.Error("send with missing body should error")
+	}
+}
+
+// TestWatchRejectsNonPositiveInterval は time.NewTicker の panic を防ぐ。
+func TestWatchRejectsNonPositiveInterval(t *testing.T) {
+	e, _ := newEnv(t)
+	run(t, e, "join", "alpha", "alice")
+	for _, v := range []string{"0", "-1s", "garbage"} {
+		if err := Run(context.Background(), e, []string{"watch", "--interval", v}); err == nil {
+			t.Errorf("watch --interval %q should error", v)
+		}
+	}
+}
+
+// TestInboxEscapesNewlines は改行入り本文が 1 行に収まる（レコード境界が壊れない）
+// ことを検証する。
+func TestInboxEscapesNewlines(t *testing.T) {
+	e, out := newEnv(t)
+	run(t, e, "join", "alpha", "alice")
+	run(t, e, "send", "alice", "line1\nline2\rcarriage")
+
+	out.Reset()
+	run(t, e, "inbox")
+	got := strings.TrimRight(out.String(), "\n")
+	if strings.Contains(got, "\n") {
+		t.Errorf("inbox output must be a single line, got:\n%q", got)
+	}
+	if !strings.Contains(got, `line1\nline2\rcarriage`) {
+		t.Errorf("newlines should be escaped in output, got:\n%q", got)
+	}
+}

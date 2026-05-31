@@ -159,8 +159,20 @@ func openStore(ctx context.Context, l paths.Layout) (*store.Store, error) {
 // formatMessage は design.md §7 の 1 行表現を返す:
 //
 //	<ts> | <team> | <from> → <to> | <body>
+//
+// body は改行を含みうる (design.md §5.1) が、watch / inbox は 1 行 = 1 レコードの
+// ストリームなので、改行をそのまま流すと購読側のレコード境界が壊れる。body 内の
+// 改行を可逆エスケープ（\\ → \\\\、改行 → \n / \r）して 1 行を保つ。
 func formatMessage(m store.Message) string {
-	return fmt.Sprintf("%s | %s | %s → %s | %s", m.CreatedAt, m.Team, m.From, m.To, m.Body)
+	return fmt.Sprintf("%s | %s | %s → %s | %s", m.CreatedAt, m.Team, m.From, m.To, escapeLine(m.Body))
+}
+
+// escapeLine は 1 行プロトコルを壊す制御文字を可逆にエスケープする。
+func escapeLine(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	s = strings.ReplaceAll(s, "\n", `\n`)
+	s = strings.ReplaceAll(s, "\r", `\r`)
+	return s
 }
 
 // Run は引数列を受けてサブコマンドへ dispatch する。args は os.Args[1:] 相当。

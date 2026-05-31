@@ -29,6 +29,10 @@ func cmdWatch(ctx context.Context, e Env, l paths.Layout, f flags) error {
 		if perr != nil {
 			return fmt.Errorf("invalid --interval %q: %w", v, perr)
 		}
+		// time.NewTicker は d <= 0 で panic するため、CLI エラーとして弾く。
+		if d <= 0 {
+			return fmt.Errorf("invalid --interval %q: must be positive", v)
+		}
 		interval = d
 	}
 
