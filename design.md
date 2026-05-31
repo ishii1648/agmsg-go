@@ -243,6 +243,15 @@ SQLite を WAL モードで使う場合、**書き込みは `messages.db` 本体
 - **`messages.db-wal` を監視**: 書き込みを最も早く捉えられるが、`-wal` は checkpoint で truncate / 再作成されうるため、ファイルの作り直しに監視が追従できる実装にする必要がある。
 - **DB の置かれた*ディレクトリ全体*を監視（採用方針）**: `messages.db` / `-wal` / `-shm` のいずれが変化しても発火する。`-wal` の再作成にも強い。発火条件をファイル単位で絞らずディレクトリ単位にすることで、WAL の実装詳細に依存しない堅牢さを得る。発火後の実取得は §8.3 のとおり `id > watermark` SELECT に委ねるため、過剰発火（無関係な `-shm` 変更等）があっても「SELECT して 0 件」で安全に空振りするだけで害はない。
 
+### 8.5 実装と実機検証の結論（issue 0002）
+
+§8.2〜§8.4 の方針を `internal/watch`（fsnotify ディレクトリ監視 + ポーリング保険）として実装し、Linux / macOS / Windows の CI matrix（`.github/workflows/test.yml`）で検証した。確定事項:
+
+- **監視対象は DB ディレクトリ（`db/`）**。ファイル単位（`messages.db` 単体や `-wal` 単体）ではなくディレクトリを `fsnotify.Add` する。`messages.db-wal` への追記でディレクトリ監視が発火することをテストで直接確認した（`TestFSNotifyFiresOnWALFile`）。これにより §8.4 の「本体だけ監視すると発火しない」罠と、checkpoint による `-wal` 再作成の両方を回避する。
+- **ポーリング保険間隔は 30 秒**（`defaultPollInterval`）を既定とする。fsnotify が主・典型遅延は実質即時で、保険は取りこぼし時の上限追従にすぎないため、案 A の 5 秒より大幅に長く取りアイドルコストを抑える。`--interval` で上書き可能。fsnotify を意図的に無効化（`DisableFSNotify`）してもポーリングのみで追従することをテストで確認した。
+- **トリガと取得の分離を徹底**。fsnotify／ポーリングのどちらでトリガされても取得は `id > watermark` SELECT に一本化（`OnTrigger`）。fsnotify イベントのバーストは短い debounce 窓（50ms）で 1 回に畳む。起動直後に一度同期し、watermark 確定〜監視確立の隙間の書き込みも取りこぼさない。
+- **fsnotify は必須ではない**。初期化や `Add` に失敗してもエラーを通知（stderr）したうえでポーリング保険にフォールバックし、watch は止めない。OS ごとの通知機構（inotify / FSEvents / ReadDirectoryChangesW）の差は fsnotify が吸収し、coalescing による丸めは watermark 追従と 30 秒保険で漏れなく回収される。
+
 ---
 
 ## 9. プロセス / ライフサイクル管理
