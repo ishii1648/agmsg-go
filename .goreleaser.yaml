@@ -1,0 +1,39 @@
+version: 2
+
+before:
+  hooks:
+    - go mod tidy
+
+builds:
+  - id: agmsg
+    main: ./cmd/agmsg/
+    binary: agmsg
+    env:
+      # modernc.org/sqlite は純 Go ドライバなので CGO 不要。
+      # CGO_ENABLED=0 のままクロスコンパイルできる（design.md §6）。
+      - CGO_ENABLED=0
+    ldflags:
+      - -s -w -X github.com/ishii1648/agmsg-go/internal/cli.version=v{{.Version}}
+    goos:
+      - darwin
+      - linux
+    goarch:
+      - amd64
+      - arm64
+
+archives:
+  - id: agmsg
+    formats:
+      - tar.gz
+    name_template: "{{ .ProjectName }}_{{ .Os }}_{{ .Arch }}"
+
+checksum:
+  name_template: "checksums.txt"
+
+changelog:
+  use: github
+  filters:
+    exclude:
+      - "^docs:"
+      - "^chore:"
+      - "^test:"
