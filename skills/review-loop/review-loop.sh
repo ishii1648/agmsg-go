@@ -55,6 +55,13 @@ die() {
   exit 1
 }
 
+# pane へ送るコマンドは値を single quote で埋め込むため、`'` を含む値は quote が壊れて
+# 任意 shell 断片として解釈されうる。埋め込む全ての値（パス・team・session-id 等）を拒否する。
+# $1: ラベル, $2: 値
+rl_reject_squote() {
+  case "$2" in *\'*) die "$1 に single quote を含む値は未対応です: $2" ;; esac
+}
+
 # ============================================================
 # 純粋ロジック（selftest 対象 — 副作用なし）
 # ============================================================
@@ -75,9 +82,14 @@ rl_review_converged() {
 
 # レビュアーへのプロンプトを stdout に生成する。
 # $1: round, $2: base_ref, $3: 前ラウンドのレビューファイル(空可), $4: agent(claude|codex),
-# $5: out_file(claude のとき書き出し先), $6: note_file(レビュー観点・空可), $7: team(claude の送信先 team)
+# $5: out_file(claude のとき書き出し先), $6: note_file(レビュー観点・空可), $7: team(claude の送信先 team),
+# $8: agmsg_home(実装役と同じ AGMSG_HOME。claude が同じ DB へ送るため・空可)
 rl_build_reviewer_prompt() {
-  local round="$1" base_ref="$2" prev_review="${3:-}" agent="${4:-codex}" out_file="${5:-}" note_file="${6:-}" team="${7:-}"
+  local round="$1" base_ref="$2" prev_review="${3:-}" agent="${4:-codex}" out_file="${5:-}" note_file="${6:-}" team="${7:-}" agmsg_home="${8:-}"
+  # claude は Bash ツール(bash)で送信するため、AGMSG_HOME を env-prefix で渡す（実装役の wait-review と
+  # 同じ DB を参照させる）。未設定なら prefix なし（両者とも既定の AGMSG_HOME）。
+  local send_prefix=""
+  [ -n "$agmsg_home" ] && send_prefix="AGMSG_HOME='$agmsg_home' "
   cat <<EOF
 あなたはコードレビュー担当です。このリポジトリの現在のブランチに加えられた変更をレビューしてください。コードは変更せず、レビューに徹してください。
 
@@ -119,9 +131,9 @@ EOF
 
 そして最後に、その判定語を使って次のコマンドを **必ず実行** してください（実装役へ完了を通知します。<判定語> を上記の実際の語に置換すること）:
 
-  agmsg send ${IMPLEMENTER_NAME} "REVIEW_RESULT: <判定語>" --from ${REVIEWER_NAME} --team ${team}
+  ${send_prefix}agmsg send '${IMPLEMENTER_NAME}' "REVIEW_RESULT: <判定語>" --from '${REVIEWER_NAME}' --team '${team}'
 
-（このメッセージで実装役が完了検知と収束判定を行います）
+（このメッセージで実装役が完了検知と収束判定を行います。コマンド先頭に環境変数の指定が付いている場合はそのまま含めて実行すること）
 EOF
   else
     # codex(headless) は stdout がそのまま review_file になる。verdict 行を1行出力させ、
@@ -139,17 +151,22 @@ EOF
 
 # レビュアー起動コマンドを stdout に生成する。
 # $1: agent, $2: work_dir, $3: prompt_file, $4: out_file(codex の stdout 捕捉先),
-# $5: claude_sid, $6: team, $7: self_path(notify-verdict 呼び出し用 review-loop.sh パス)
+# $5: claude_sid, $6: team, $7: self_path(notify-verdict 呼び出し用 review-loop.sh パス),
+# $8: agmsg_home(実装役と同じ AGMSG_HOME を notify-verdict へ引き渡す・空可)
 rl_build_reviewer_cmd() {
-  local agent="$1" work_dir="$2" prompt_file="$3" out_file="${4:-}" claude_sid="${5:-}" team="${6:-}" self_path="${7:-}"
+  local agent="$1" work_dir="$2" prompt_file="$3" out_file="${4:-}" claude_sid="${5:-}" team="${6:-}" self_path="${7:-}" agmsg_home="${8:-}"
   case "$agent" in
     codex)
       # headless。read-only で機構的にコード変更を禁止。stdout(レビュー本文)だけを out_file に捕捉し、
       # stderr(codex の hook/進捗ログ)は <out_file>.log に分離する。exec 終了後に wrapper が verdict を
       # 抽出して agmsg send する（`;` で連鎖し exec の exit code によらず必ず通知を試みる）。
       # fish pane へ send-keys されるため、env-prefix(`VAR=val cmd`)や `$(...)` を使わず bash サブコマンドに委ねる。
-      printf "codex exec -C '%s' -s read-only - < '%s' > '%s' 2> '%s.log'; bash '%s' notify-verdict --team '%s' --out '%s'" \
-        "$work_dir" "$prompt_file" "$out_file" "$out_file" "$self_path" "$team" "$out_file"
+      # notify-verdict(bash) は --home で受けた AGMSG_HOME を export してから送信するため、reviewer と
+      # 実装役が同じ DB を参照する（pane へ env を伝播できない問題を回避）。
+      local notify="bash '$self_path' notify-verdict --team '$team' --out '$out_file'"
+      [ -n "$agmsg_home" ] && notify="$notify --home '$agmsg_home'"
+      printf "codex exec -C '%s' -s read-only - < '%s' > '%s' 2> '%s.log'; %s" \
+        "$work_dir" "$prompt_file" "$out_file" "$out_file" "$notify"
       ;;
     claude)
       # interactive 起動（`-p`/`--print` は使わない＝subscription 課金）。各ラウンド stateless（前回レビューは
@@ -293,6 +310,21 @@ cmd_review_once() {
   local work_dir="$repo_root"
   [ -z "$base_ref" ] && base_ref=$(rl_resolve_base_ref "$work_dir")
 
+  # pane へ送るコマンドに single quote で埋め込む値はすべて `'` を拒否する。
+  # SELF（notify-verdict 呼び出しに埋め込む review-loop.sh パス）も対象。
+  rl_reject_squote "work_dir" "$work_dir"
+  rl_reject_squote "review-loop.sh パス" "$SELF"
+  # session_id は out_dir / review_prompt / review_out / team(= agmsg の team 名)の素になり、
+  # codex / claude 双方の pane コマンドに埋め込まれる。空白・`;`・quote 等が混ざるとコマンドが
+  # 壊れる/injection になるため、shell-safe な文字種（英数・. _ -）に限定する。
+  case "$session_id" in
+    ''|*[!A-Za-z0-9._-]*) die "session-id は英数と . _ - のみ使用できます: $session_id" ;;
+  esac
+
+  # 実装役(この review-once / wait-review)と同じ AGMSG_HOME を reviewer 側へ伝播する。
+  local agmsg_home="${AGMSG_HOME:-}"
+  rl_reject_squote "AGMSG_HOME" "$agmsg_home"
+
   # per-session の ephemeral team（= session-id）。明示 identity フラグで送受信するため join 不要。
   local team="$session_id"
 
@@ -309,17 +341,18 @@ cmd_review_once() {
   local claude_sid="" prompt_out_file=""
   if [ "$reviewer" = claude ]; then
     claude_sid=$(uuidgen | tr '[:upper:]' '[:lower:]')
+    rl_reject_squote "claude session-id" "$claude_sid"
     prompt_out_file="$review_out"
   fi
 
-  rl_build_reviewer_prompt "$round" "$base_ref" "$prev_review" "$reviewer" "$prompt_out_file" "$note_file" "$team" > "$review_prompt"
+  rl_build_reviewer_prompt "$round" "$base_ref" "$prev_review" "$reviewer" "$prompt_out_file" "$note_file" "$team" "$agmsg_home" > "$review_prompt"
 
   local tmux_session; tmux_session=$(tmux display-message -p '#{session_name}')
   local pane
   pane=$(create_role_window "$tmux_session" "rl-rev-$round" "$work_dir") || die "reviewer window の作成に失敗しました"
 
   local rcmd
-  rcmd=$(rl_build_reviewer_cmd "$reviewer" "$work_dir" "$review_prompt" "$review_out" "$claude_sid" "$team" "$SELF")
+  rcmd=$(rl_build_reviewer_cmd "$reviewer" "$work_dir" "$review_prompt" "$review_out" "$claude_sid" "$team" "$SELF" "$agmsg_home")
   launch_in_pane "$pane" "$work_dir" "$rcmd"
 
   [ "$round" -eq 1 ] && [ ! -f "$(manifest_path "$session_id")" ] && \
@@ -342,18 +375,21 @@ cmd_review_once() {
 # ============================================================
 
 cmd_notify_verdict() {
-  local team="" out_file="" to_name="$IMPLEMENTER_NAME" from_name="$REVIEWER_NAME"
+  local team="" out_file="" to_name="$IMPLEMENTER_NAME" from_name="$REVIEWER_NAME" home=""
   while [ $# -gt 0 ]; do
     case "$1" in
       --team) team="$2"; shift 2 ;;
       --out)  out_file="$2"; shift 2 ;;
       --to)   to_name="$2"; shift 2 ;;
       --from) from_name="$2"; shift 2 ;;
+      --home) home="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
   [ -z "$team" ]     && die "--team が指定されていません"
   [ -z "$out_file" ] && die "--out が指定されていません"
+  # 実装役(wait-review)と同じ DB を参照させる。pane に env を伝播できないため --home で受けて export する。
+  [ -n "$home" ] && export AGMSG_HOME="$home"
   command -v agmsg >/dev/null 2>&1 || die "agmsg が利用できません"
 
   # review_file から verdict を抽出。無ければ安全側に CHANGES_REQUESTED（実装役が再確認できる）。
@@ -500,12 +536,16 @@ cmd_selftest() {
   local inbox_line='1970-01-01T00:00:00Z | reviewloop-x | reviewer → implementer | REVIEW_RESULT: APPROVED'
   assert_contains "verdict from inbox line" "APPROVED" "$(printf '%s\n' "$inbox_line" | rl_verdict_word)"
 
+  # --- single quote guard（die が exit するため subshell で検証）---
+  if ( rl_reject_squote "t" "/safe/path-ok" ) >/dev/null 2>&1; then echo "ok  reject_squote: 安全な値は通る"; else echo "NG  reject_squote: 安全な値が拒否された"; fail=1; fi
+  if ( rl_reject_squote "t" "has'quote" ) >/dev/null 2>&1; then echo "NG  reject_squote: ' を含む値が通った"; fail=1; else echo "ok  reject_squote: ' を含む値を拒否"; fi
+
   # --- レビュアープロンプト ---
   printf 'レビュー指摘ABC' > "$tmp/review.md"
   printf 'パフォーマンス観点XYZ' > "$tmp/note.md"
   local rev_codex rev_claude
-  rev_codex=$(rl_build_reviewer_prompt 1 main "" codex "" "" reviewloop-x)
-  rev_claude=$(rl_build_reviewer_prompt 1 main "" claude "$tmp/round-1-review.md" "" reviewloop-x)
+  rev_codex=$(rl_build_reviewer_prompt 1 main "" codex "" "" reviewloop-x "$HOME/.agents/skills/agmsg")
+  rev_claude=$(rl_build_reviewer_prompt 1 main "" claude "$tmp/round-1-review.md" "" reviewloop-x "$HOME/.agents/skills/agmsg")
   assert_contains  "review prompt(codex): REVIEW_RESULT 指示"        'REVIEW_RESULT:'    "$rev_codex"
   assert_contains  "review prompt(codex): APPROVED 言及"             'APPROVED'          "$rev_codex"
   assert_contains  "review prompt(codex): CHANGES_REQUESTED 言及"    'CHANGES_REQUESTED' "$rev_codex"
@@ -513,7 +553,10 @@ cmd_selftest() {
   assert_no_verdict "review prompt(claude): 判定パターン非混入(回帰防止)" "$rev_claude"
   assert_contains  "review prompt(claude): ファイル書き出し指示"     'round-1-review.md' "$rev_claude"
   assert_contains  "review prompt(claude): agmsg send 指示"         'agmsg send'        "$rev_claude"
-  assert_contains  "review prompt(claude): team 埋め込み"           'reviewloop-x'      "$rev_claude"
+  assert_contains  "review prompt(claude): team を quote して埋め込み" "--team 'reviewloop-x'" "$rev_claude"
+  assert_contains  "review prompt(claude): AGMSG_HOME 伝播"         'AGMSG_HOME='       "$rev_claude"
+  # AGMSG_HOME 未指定なら prefix を付けない（両者とも既定 DB）
+  assert_excludes  "review prompt(claude): home 空なら prefix なし" 'AGMSG_HOME=' "$(rl_build_reviewer_prompt 1 main "" claude "$tmp/round-1-review.md" "" reviewloop-x "")"
   assert_excludes  "review prompt(codex): ファイル書き出し指示は無い" 'Write ツール'     "$rev_codex"
   assert_excludes  "review prompt(codex): agmsg send 指示は無い"     'agmsg send'       "$rev_codex"
   assert_contains  "review prompt r2(codex): 前回レビュー同梱"       'レビュー指摘ABC'   "$(rl_build_reviewer_prompt 2 main "$tmp/review.md" codex "" "" reviewloop-x)"
@@ -521,7 +564,7 @@ cmd_selftest() {
 
   # --- レビュアーコマンド生成 ---
   local c
-  c=$(rl_build_reviewer_cmd codex /w /p/rv /o/rev.md "" reviewloop-x /skills/review-loop.sh)
+  c=$(rl_build_reviewer_cmd codex /w /p/rv /o/rev.md "" reviewloop-x /skills/review-loop.sh /home/u/.agents/skills/agmsg)
   assert_contains "cmd codex reviewer: codex exec"      'codex exec'         "$c"
   assert_contains "cmd codex reviewer: read-only"       '-s read-only'       "$c"
   assert_contains "cmd codex reviewer: stdout 捕捉"     "> '/o/rev.md'"      "$c"
@@ -531,6 +574,9 @@ cmd_selftest() {
   # exec 終了後に notify-verdict を連鎖する（verdict を agmsg send）
   assert_contains "cmd codex reviewer: notify-verdict 連鎖" 'notify-verdict' "$c"
   assert_contains "cmd codex reviewer: team 引き渡し"   "--team 'reviewloop-x'" "$c"
+  assert_contains "cmd codex reviewer: AGMSG_HOME 引き渡し" "--home '/home/u/.agents/skills/agmsg'" "$c"
+  # home 空なら --home を付けない
+  assert_excludes "cmd codex reviewer: home 空なら --home なし" '--home' "$(rl_build_reviewer_cmd codex /w /p/rv /o/rev.md '' reviewloop-x /skills/review-loop.sh '')"
   # fish pane へ送るため env-prefix / コマンド置換は使わない
   assert_excludes "cmd codex reviewer: env-prefix 不使用" 'AGMSG_NAME='       "$c"
   assert_excludes "cmd codex reviewer: \$() 不使用"       '$('               "$c"

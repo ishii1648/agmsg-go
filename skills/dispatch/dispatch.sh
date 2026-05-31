@@ -286,11 +286,23 @@ cmd_launch() {
     work_dir=$(checkout_default_branch "$repo_path")
   fi
 
+  # work_dir / prompt_file は pane へ送るコマンドに single quote で埋め込む。`'` を含むパスは
+  # quote が壊れて任意 shell 断片として解釈されうるため拒否する（prompt_file は work_dir 配下に作る）。
+  case "$work_dir" in *\'*) die "work_dir に single quote を含むパスは未対応です: $work_dir" ;; esac
+
   # agmsg auto-join: 起動 agent の identity (name, team) を config に登録し、親 session から
   # `agmsg send <name> --team <team>` で到達可能にする。join は config への登録なので、
   # dispatch.sh（bash）が代行して実行できる（fish pane への send-keys 制約を回避）。
   # 起動した agent は work_dir に居れば (type, project) 自動解決で同じ identity に解決される。
-  local agmsg_joined="" agmsg_type=""
+  #
+  # AGMSG_HOME の伝播: join は dispatch.sh の AGMSG_HOME に書く。起動した agent も同じ DB を
+  # 見るよう、AGMSG_HOME が設定されていれば launcher コマンドへ env-prefix で伝播する
+  # （`env VAR=val cmd` は bash/fish 双方で動く。pane の shell builtin 代入 `VAR=val cmd` は fish 非対応）。
+  local agmsg_joined="" agmsg_type="" agmsg_env_prefix=""
+  if [ -n "${AGMSG_HOME:-}" ]; then
+    case "$AGMSG_HOME" in *\'*) die "AGMSG_HOME に single quote を含むパスは未対応です: $AGMSG_HOME" ;; esac
+    agmsg_env_prefix="env AGMSG_HOME='$AGMSG_HOME' "
+  fi
   if [ "$no_agmsg" = false ] && command -v agmsg >/dev/null 2>&1; then
     # team: --agmsg-team > 親の AGMSG_TEAM > repo basename
     [ -z "$agmsg_team" ] && agmsg_team="${AGMSG_TEAM:-$(basename "$repo_path")}"
@@ -397,17 +409,19 @@ cmd_launch() {
 
   if [ "$no_prompt" = true ]; then
     # launcher 名のみ送る（claude も codex も同様）
-    tmux send-keys -t "$target_pane_id" "cd '$work_dir'; $launcher" Enter
+    tmux send-keys -t "$target_pane_id" "cd '$work_dir'; ${agmsg_env_prefix}$launcher" Enter
   else
     case "$launcher" in
       claude)
-        tmux send-keys -t "$target_pane_id" "cd '$work_dir'; claude < '$prompt_file'" Enter
+        tmux send-keys -t "$target_pane_id" "cd '$work_dir'; ${agmsg_env_prefix}claude < '$prompt_file'" Enter
         ;;
       codex)
         # codex の TUI は stdin redirect 不可のため、位置引数で prompt を渡す
         # 改行を含む prompt は $(/bin/cat ...) でそのまま読ませる（shell quote で injection 対策）
         # 絶対パス指定で fish の abbreviation/alias（例: cat → nyan）を確実に回避する
-        tmux send-keys -t "$target_pane_id" "cd '$work_dir'; codex -C '$work_dir' \"\$(/bin/cat '$prompt_file')\"" Enter
+        # 注: `$(...)` を使うため pane の shell は bash / zsh / fish 3.4+ のいずれかであること
+        # （fish は 3.4 以降 `$()` を posix 互換で解釈する）。claude 経路は stdin redirect で全 shell 可。
+        tmux send-keys -t "$target_pane_id" "cd '$work_dir'; ${agmsg_env_prefix}codex -C '$work_dir' \"\$(/bin/cat '$prompt_file')\"" Enter
         ;;
     esac
   fi

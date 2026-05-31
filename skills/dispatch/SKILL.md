@@ -101,6 +101,8 @@ bash ~/.claude/skills/dispatch/dispatch.sh launch "<repo>" "<prompt>" --branch "
 
 `agmsg` が PATH にある場合（`--no-agmsg` 指定時を除く）、dispatch は起動した agent の identity `(name, team)` を `agmsg join` で登録する。これにより親 session から `agmsg send <name> --team <team>` でメッセージを送れ、起動 agent は work_dir に居れば `(type, project)` 自動解決で同じ identity に解決される（claude→type `claude-code`、codex→type `codex`）。`agmsg` が無ければ join をスキップして従来どおり起動する（破壊しない）。登録した identity は `LAUNCHED` 出力の `AGMSG:` 行に表示される。
 
+`AGMSG_HOME`（DB の置き場所）が設定されている場合は、join 先と起動 agent が同じ DB を見るよう launcher コマンドへ `env AGMSG_HOME=...` で伝播する（未設定なら両者とも既定 `~/.agents/skills/agmsg`）。`work_dir` / `AGMSG_HOME` に single quote を含むパスは pane へのコマンド送出が壊れるため拒否する。
+
 ### Step 5: STATUS に応じて分岐
 
 | STATUS | 対応 |
