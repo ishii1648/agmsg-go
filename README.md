@@ -67,7 +67,7 @@ agmsg skills install --force    # 既存ファイルを上書き（既定は保�
 agmsg skills list               # 同梱 skills の一覧を表示
 ```
 
-`go install` と合わせれば、協調ワークフロー一式が 2 行で揃います。詳細は [§skills](#skills-dispatch--review-loop) を参照してください。
+`go install` と合わせれば、協調ワークフロー一式が 2 行で揃います。手順全体は [setup.md](./setup.md)、skills の概要は [§skills](#skills-dispatch--review-loop) を参照してください。
 
 ## サブコマンド（暫定）
 
@@ -113,6 +113,7 @@ IPC プリミティブを使う具体的なワークフローを **skills 層**�
 
 ## ドキュメント
 
+- [setup.md](./setup.md) — セットアップ手順（binary の導入・skills の展開・動作確認）
 - [design.md](./design.md) — 設計判断とその根拠（アーキテクチャ / データモデル / 受信検知 / ライフサイクル管理 / トレードオフ）
 
 ## ライセンス
