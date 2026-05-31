@@ -1,1 +1,4 @@
 .claude/
+
+# GoReleaser build output
+/dist/

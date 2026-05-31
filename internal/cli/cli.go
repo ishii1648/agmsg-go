@@ -37,6 +37,10 @@ const defaultType = "claude-code"
 // tsLayout は created_at / read_at と揃えた ISO-8601 (UTC)。
 const tsLayout = "2006-01-02T15:04:05Z"
 
+// version は agmsg のバージョン。ローカルビルドでは "dev"、リリース時に
+// -ldflags "-X .../internal/cli.version=..." で上書きする（.goreleaser.yaml）。
+var version = "dev"
+
 // Env は I/O とクロックを注入可能にした実行環境（テスト容易性のため）。
 type Env struct {
 	Stdout io.Writer
@@ -219,6 +223,10 @@ func Run(ctx context.Context, e Env, args []string) error {
 		printUsage(e.Stdout)
 		return nil
 	}
+	if sub == "version" || sub == "--version" {
+		fmt.Fprintln(e.Stdout, version)
+		return nil
+	}
 	f, err := parseFlags(rest)
 	if err != nil {
 		return err
@@ -272,6 +280,7 @@ Usage:
   agmsg join  <team> <name> [--type <type>] [--project <path>]
   agmsg leave <team> <name> [--type <type>] [--project <path>]
   agmsg whoami            [--type <type>] [--project <path>]
+  agmsg version
 
 識別子 (name, team) はフラグ／環境変数 (AGMSG_NAME, AGMSG_TEAM, AGMSG_TYPE,
 AGMSG_PROJECT)、または現在の (type, project) からの一意解決で確定します。
