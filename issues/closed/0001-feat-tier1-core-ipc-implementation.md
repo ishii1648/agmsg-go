@@ -1,6 +1,7 @@
 ---
 decision_type: implementation
 tags: [ipc, sqlite, cli, tier1]
+closed_at: 2026-05-31
 ---
 
 # Tier 1 最小コア（IPC プリミティブ）を Go で実装する
@@ -35,3 +36,22 @@ bash 版最大の構造的弱点である「手動 SQL エスケープ」を最�
 - 各層に `go test` を付ける（store の placeholder 安全性・identity 同一性判定を最低限カバー）。
 
 Tier 2/3 コマンド・配信モードのフック連携・ライフサイクル管理（二重起動防止・孤児回収 / §9）は本 issue のスコープ外。必要になった時点で別 issue に起こす。
+
+Completed: 2026-05-31
+
+## 解決方法
+
+`modernc.org/sqlite`（純 Go・CGO 不要 / §5.2）で Tier 1 を実装。パッケージは design.md §11 の構成に従う。
+
+- `internal/store` — SQL を扱う唯一の層。Insert / Unread / TakeUnread / MaxID / Since を全て placeholder バインドで実装し、bash 版最大の弱点（手動エスケープ / §3.1 弱点(1)）を構造的に封じた。スキーマは §5.1 と互換（`IF NOT EXISTS` で bash 版 DB にも冪等）。`TakeUnread` は取得＋既読化を単一トランザクション化。
+- `internal/identity` — `(name, team)` を値型の同一性キー、`(type, project)` を Registration（メタデータ）とし、解決結果の一意判定まで型に固定（§6）。
+- `internal/config` — `teams/<team>/config.json` の読み書き（オリジナル互換構造）。Join/Leave の dedupe と、全チーム走査による identity 解決（whoami 相当）。
+- `internal/cli` + `cmd/agmsg` — send / inbox / watch / join / leave / whoami。識別子はフラグ／env／一意解決で確定し、曖昧時はエラーで利用側にフラグ指定を促す（policy を埋めない / §2.1）。dispatch は main のみ。
+- `watch` は単純ポーリングで実装（`id > watermark` の差分 stream / §7）。fsnotify 化は [[0002-design-wal-fsnotify-monitor-validation]] に委譲。
+
+検証: `go test -race ./...` / `go vet ./...` 通過。store の placeholder 安全性・identity 同一性判定・CLI 結合フロー（join→send→inbox、曖昧解決のエラー）をカバー。実バイナリで send/inbox/watch/whoami と config.json 互換出力を確認。
+
+### 採用しなかった代替
+
+- `internal/paths` の OS 別ビルドタグ分割（§11 で言及）は、Tier 1 が扱う `~/.agents` に darwin/linux 間の実差が無いため見送り。実際の OS 差が生じた時点で `paths_<os>.go` を追加する。
+- stdlib `flag` は位置引数の後ろのフラグを解さず `send <to> <body> --from x` を阻むため、`--key value` / `--key=value` を任意位置から抜く簡易パーサを `internal/cli` に置いた。
