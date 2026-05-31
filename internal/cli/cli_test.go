@@ -119,6 +119,21 @@ func TestSendAmbiguousIdentity(t *testing.T) {
 	run(t, e, "send", "bob", "x", "--team", "beta")
 }
 
+// TestFlagRequiresValue は値必須フラグの値欠落が env/default へフォールバックして
+// 誤送信になる footgun を防ぐ（値なし --team はエラー）。
+func TestFlagRequiresValue(t *testing.T) {
+	t.Setenv("AGMSG_TEAM", "alpha") // フォールバック先があっても化けないこと
+	e, _ := newEnv(t)
+	run(t, e, "join", "alpha", "alice")
+	if err := Run(context.Background(), e, []string{"send", "bob", "hi", "--team"}); err == nil {
+		t.Error("value-less --team must error, not fall back to AGMSG_TEAM")
+	}
+	// 末尾でなく別フラグが続く場合も値欠落として弾く。
+	if err := Run(context.Background(), e, []string{"send", "bob", "hi", "--team", "--from", "alice"}); err == nil {
+		t.Error("--team followed by another flag must error")
+	}
+}
+
 func TestUnknownSubcommand(t *testing.T) {
 	e, _ := newEnv(t)
 	if err := Run(context.Background(), e, []string{"frobnicate"}); err == nil {

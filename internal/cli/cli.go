@@ -59,7 +59,7 @@ type flags struct {
 	pos  []string
 }
 
-func parseFlags(args []string) flags {
+func parseFlags(args []string) (flags, error) {
 	f := flags{opts: map[string]string{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
@@ -76,22 +76,28 @@ func parseFlags(args []string) flags {
 				f.opts[key[:eq]] = key[eq+1:]
 				continue
 			}
-			// 次トークンを値として消費（次がフラグでない限り）。
+			// 次トークンを値として消費（次がフラグでない限り）。Tier 1 の全フラグは
+			// 値必須なので、値が無い `--team` 単独はエラーにする。これを空文字として
+			// 受理すると get が env/default にフォールバックし、`--team`(値なし)が
+			// AGMSG_TEAM 宛てに化けて誤送信になる。
 			if i+1 < len(args) && !strings.HasPrefix(args[i+1], "--") {
 				f.opts[key] = args[i+1]
 				i++
 			} else {
-				f.opts[key] = "" // 値なしフラグ
+				return flags{}, fmt.Errorf("flag --%s requires a value", key)
 			}
 			continue
 		}
 		f.pos = append(f.pos, a)
 	}
-	return f
+	return f, nil
 }
 
+// get はフラグ値を返す。フラグが明示指定されていれば（空文字含め）それを優先し、
+// 未指定のときのみ env → default にフォールバックする。明示指定を env で上書き
+// しないことで挙動を予測可能にする。
 func (f flags) get(key, env, def string) string {
-	if v, ok := f.opts[key]; ok && v != "" {
+	if v, ok := f.opts[key]; ok {
 		return v
 	}
 	if env != "" {
@@ -193,7 +199,14 @@ func Run(ctx context.Context, e Env, args []string) error {
 		return fmt.Errorf("no subcommand given")
 	}
 	sub, rest := args[0], args[1:]
-	f := parseFlags(rest)
+	if sub == "help" || sub == "-h" || sub == "--help" {
+		printUsage(e.Stdout)
+		return nil
+	}
+	f, err := parseFlags(rest)
+	if err != nil {
+		return err
+	}
 
 	switch sub {
 	case "send":
@@ -208,9 +221,6 @@ func Run(ctx context.Context, e Env, args []string) error {
 		return cmdLeave(ctx, e, l, f)
 	case "whoami":
 		return cmdWhoami(ctx, e, l, f)
-	case "help", "-h", "--help":
-		printUsage(e.Stdout)
-		return nil
 	default:
 		printUsage(e.Stderr)
 		return fmt.Errorf("unknown subcommand %q", sub)

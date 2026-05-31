@@ -14,6 +14,7 @@ import (
 	"database/sql"
 	"fmt"
 	"sort"
+	"strings"
 
 	_ "modernc.org/sqlite"
 )
@@ -40,7 +41,10 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 	// WAL + busy_timeout を DSN pragma で設定。
 	// WAL: 複数リーダ + 1 ライタ (design.md §4)。
 	// busy_timeout: 同時書き込み競合時にすぐ諦めず待つ。
-	dsn := fmt.Sprintf("file:%s?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)", dbPath)
+	// パスは file: URI の path 部に percent-encode して埋める。modernc は file:
+	// 前置時に全体を SQLITE_OPEN_URI で SQLite へ渡すため、AGMSG_HOME に ? や #
+	// が含まれても query/fragment と誤解釈されず、SQLite が復号して元パスに戻す。
+	dsn := fileURI(dbPath) + "?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_pragma=foreign_keys(ON)"
 	db, err := sql.Open("sqlite", dsn)
 	if err != nil {
 		return nil, err
@@ -58,6 +62,29 @@ func Open(ctx context.Context, dbPath string) (*Store, error) {
 
 // Close は接続を閉じる。
 func (s *Store) Close() error { return s.db.Close() }
+
+// fileURI は OS パスを SQLite の file: URI に変換する。path 部で URI デリミタと
+// なる文字（'?' '#'）と、エスケープ開始文字 '%' のみを percent-encode する。
+// SQLite はこれらを復号して元のパスに戻すため、任意の AGMSG_HOME を安全に扱える。
+// '?' '#' '%' はいずれも ASCII なので、UTF-8 マルチバイト列（全バイト >= 0x80）を
+// 壊さずバイト走査でよい。特殊文字を含まない通常パスは "file:<path>" のまま。
+func fileURI(path string) string {
+	const hex = "0123456789ABCDEF"
+	var b strings.Builder
+	b.Grow(len("file:") + len(path))
+	b.WriteString("file:")
+	for i := 0; i < len(path); i++ {
+		switch c := path[i]; c {
+		case '?', '#', '%':
+			b.WriteByte('%')
+			b.WriteByte(hex[c>>4])
+			b.WriteByte(hex[c&0x0f])
+		default:
+			b.WriteByte(c)
+		}
+	}
+	return b.String()
+}
 
 // Insert は 1 件を追加し、採番された id を返す。created_at はスキーマ既定に委ねる。
 // 全フィールドを placeholder バインドで渡す。
