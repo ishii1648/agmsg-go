@@ -63,6 +63,13 @@ func parseFlags(args []string) flags {
 	f := flags{opts: map[string]string{}}
 	for i := 0; i < len(args); i++ {
 		a := args[i]
+		// POSIX の "--" sentinel: 以降は全て位置引数として扱う。body が opaque な
+		// TEXT (design.md §2 非目標) であり "--json" のように "--" 始まりでもありうる
+		// ため、`agmsg send bob -- --json` で本文をそのまま送れるようにする。
+		if a == "--" {
+			f.pos = append(f.pos, args[i+1:]...)
+			break
+		}
 		if strings.HasPrefix(a, "--") {
 			key := a[2:]
 			if eq := strings.IndexByte(key, '='); eq >= 0 {

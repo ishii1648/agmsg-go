@@ -62,6 +62,20 @@ func TestSendInboxFlow(t *testing.T) {
 	}
 }
 
+// TestSendDashDashBody は "--" sentinel で "--" 始まりの本文を送れることを検証する。
+// body は不透明な TEXT なので、本文の先頭文字列で送信不能になってはならない。
+func TestSendDashDashBody(t *testing.T) {
+	e, out := newEnv(t)
+	run(t, e, "join", "alpha", "alice")
+	run(t, e, "send", "alice", "--", "--json={\"k\":1}")
+
+	out.Reset()
+	run(t, e, "inbox")
+	if !strings.Contains(out.String(), `--json={"k":1}`) {
+		t.Errorf("body starting with -- should be deliverable, got:\n%s", out.String())
+	}
+}
+
 func TestWhoami(t *testing.T) {
 	e, out := newEnv(t)
 
