@@ -45,6 +45,11 @@ REVIEW_VERDICT_RE='REVIEW_RESULT:[[:space:]]*(APPROVED|CHANGES_REQUESTED)'
 IMPLEMENTER_NAME="implementer"
 REVIEWER_NAME="reviewer"
 
+# round ごとに実装役の受信 identity を分ける（残留 / クロスラウンドの verdict 誤受信を防ぐ）。
+# 同一 team へ複数 round や二重起動の verdict が混じっても、round 別 inbox なので取り違えない。
+# $1: round
+implementer_round_name() { echo "${IMPLEMENTER_NAME}-r$1"; }
+
 # このスクリプト自身の絶対パス（codex wrapper から notify-verdict を呼ぶため）。
 SELF="$(cd "$(dirname "$0")" >/dev/null 2>&1 && pwd)/$(basename "$0")"
 
@@ -80,6 +85,15 @@ rl_review_converged() {
   [ "$(rl_verdict_word < "$out_file")" = "APPROVED" ]
 }
 
+# verdict メッセージ本文を組み立てる。round を併記して受信側が round を突合できるようにする。
+# $1: verdict, $2: round
+rl_verdict_body() { echo "REVIEW_RESULT: $1 round=$2"; }
+
+# stdin から最後に出現した round=<N> の数値を echo する（無ければ空）。verdict↔round の突合に使う。
+rl_verdict_round() {
+  grep -oiE 'round=[0-9]+' 2>/dev/null | tail -n 1 | grep -oiE '[0-9]+' || true
+}
+
 # レビュアーへのプロンプトを stdout に生成する。
 # $1: round, $2: base_ref, $3: 前ラウンドのレビューファイル(空可), $4: agent(claude|codex),
 # $5: out_file(claude のとき書き出し先), $6: note_file(レビュー観点・空可), $7: team(claude の送信先 team),
@@ -90,6 +104,8 @@ rl_build_reviewer_prompt() {
   # 同じ DB を参照させる）。未設定なら prefix なし（両者とも既定の AGMSG_HOME）。
   local send_prefix=""
   [ -n "$agmsg_home" ] && send_prefix="AGMSG_HOME='$agmsg_home' "
+  # round 別の受信 identity（実装役は round ごとに別 inbox を待つ）。
+  local impl_round_name; impl_round_name=$(implementer_round_name "$round")
   cat <<EOF
 あなたはコードレビュー担当です。このリポジトリの現在のブランチに加えられた変更をレビューしてください。コードは変更せず、レビューに徹してください。
 
@@ -129,11 +145,11 @@ EOF
   - 承認のときの判定語 … APPROVED
   - 変更要求のときの判定語 … CHANGES_REQUESTED
 
-そして最後に、その判定語を使って次のコマンドを **必ず実行** してください（実装役へ完了を通知します。<判定語> を上記の実際の語に置換すること）:
+そして最後に、その判定語を使って次のコマンドを **必ず実行** してください（実装役へ完了を通知します。<判定語> を上記の実際の語に置換すること。`round=${round}` の部分はそのまま含めること）:
 
-  ${send_prefix}agmsg send '${IMPLEMENTER_NAME}' "REVIEW_RESULT: <判定語>" --from '${REVIEWER_NAME}' --team '${team}'
+  ${send_prefix}agmsg send '${impl_round_name}' "REVIEW_RESULT: <判定語> round=${round}" --from '${REVIEWER_NAME}' --team '${team}'
 
-（このメッセージで実装役が完了検知と収束判定を行います。コマンド先頭に環境変数の指定が付いている場合はそのまま含めて実行すること）
+（このメッセージで実装役が完了検知と収束判定を行います。宛先名と round はこの round 専用なので改変しないこと。コマンド先頭に環境変数の指定が付いている場合はそのまま含めて実行すること）
 EOF
   else
     # codex(headless) は stdout がそのまま review_file になる。verdict 行を1行出力させ、
@@ -152,9 +168,9 @@ EOF
 # レビュアー起動コマンドを stdout に生成する。
 # $1: agent, $2: work_dir, $3: prompt_file, $4: out_file(codex の stdout 捕捉先),
 # $5: claude_sid, $6: team, $7: self_path(notify-verdict 呼び出し用 review-loop.sh パス),
-# $8: agmsg_home(実装役と同じ AGMSG_HOME を notify-verdict へ引き渡す・空可)
+# $8: agmsg_home(実装役と同じ AGMSG_HOME を notify-verdict へ引き渡す・空可), $9: round(codex notify の round 引き渡し)
 rl_build_reviewer_cmd() {
-  local agent="$1" work_dir="$2" prompt_file="$3" out_file="${4:-}" claude_sid="${5:-}" team="${6:-}" self_path="${7:-}" agmsg_home="${8:-}"
+  local agent="$1" work_dir="$2" prompt_file="$3" out_file="${4:-}" claude_sid="${5:-}" team="${6:-}" self_path="${7:-}" agmsg_home="${8:-}" round="${9:-}"
   case "$agent" in
     codex)
       # headless。read-only で機構的にコード変更を禁止。stdout(レビュー本文)だけを out_file に捕捉し、
@@ -162,8 +178,9 @@ rl_build_reviewer_cmd() {
       # 抽出して agmsg send する（`;` で連鎖し exec の exit code によらず必ず通知を試みる）。
       # fish pane へ send-keys されるため、env-prefix(`VAR=val cmd`)や `$(...)` を使わず bash サブコマンドに委ねる。
       # notify-verdict(bash) は --home で受けた AGMSG_HOME を export してから送信するため、reviewer と
-      # 実装役が同じ DB を参照する（pane へ env を伝播できない問題を回避）。
+      # 実装役が同じ DB を参照する（pane へ env を伝播できない問題を回避）。--round で round 別 inbox へ送る。
       local notify="bash '$self_path' notify-verdict --team '$team' --out '$out_file'"
+      [ -n "$round" ] && notify="$notify --round '$round'"
       [ -n "$agmsg_home" ] && notify="$notify --home '$agmsg_home'"
       printf "codex exec -C '%s' -s read-only - < '%s' > '%s' 2> '%s.log'; %s" \
         "$work_dir" "$prompt_file" "$out_file" "$out_file" "$notify"
@@ -192,6 +209,44 @@ rl_resolve_base_ref() {
 
 # レビュー出力ディレクトリ（repo, session_id）。
 out_dir_for() { echo "$1/.outputs/claude/review-loop/$2"; }
+
+# session-id を衝突不能に採番する。`reviewloop-<repo_basename>-<utc_stamp>-<rand>`。
+# 秒解像度のタイムスタンプだけでは並列 worktree / 同一秒起動で衝突するため、必ず乱数尾部を付ける。
+# 文字種は session-id 制約（英数 . _ -）に収まるようサニタイズする。
+# $1: repo_root
+rl_mint_session_id() {
+  local repo="$1" base rand stamp
+  base=$(basename "$repo" 2>/dev/null | tr -c 'A-Za-z0-9._-' '-' | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')
+  [ -z "$base" ] && base="repo"
+  stamp=$(date -u +%Y%m%d-%H%M%S)
+  # openssl があれば 6 hex、無ければ $RANDOM 2 連で代替（どちらも英数のみ）。
+  if command -v openssl >/dev/null 2>&1; then
+    rand=$(openssl rand -hex 3)
+  else
+    rand=$(printf '%04x%04x' "$((RANDOM))" "$((RANDOM))")
+  fi
+  echo "reviewloop-${base}-${stamp}-${rand}"
+}
+
+# (session, round) の launch 排他ロックをアトミックに取得する（mkdir はアトミック）。
+# 取得できれば 0、既に存在すれば 1。ロックは launch 中のみ保持し review-once 終了時に解放する。
+# session-id は Fix A で run ごとに一意なので、万一ロックが残留しても新 run は別 session-id で影響を受けない。
+# $1: lock_dir
+rl_try_lock() { mkdir "$1" 2>/dev/null; }
+
+# pane が生存し、かつレビュアー(agent / node 等)を実行中かを判定する（シェルに戻っていれば終了済み扱い）。
+# 生存中なら 0。二重起動の検出に使う。
+# $1: pane_id
+rl_pane_alive() {
+  local pane_id="$1" cmd
+  [ -n "$pane_id" ] || return 1
+  cmd=$(tmux display-message -p -t "$pane_id" '#{pane_current_command}' 2>/dev/null) || return 1
+  case "$cmd" in
+    fish|bash|zsh|sh|dash|-fish|-bash|-zsh|-sh) return 1 ;;  # シェルに戻っている＝レビュアー終了
+    "") return 1 ;;
+    *) return 0 ;;
+  esac
+}
 
 # ============================================================
 # manifest
@@ -293,10 +348,12 @@ cmd_review_once() {
   done
 
   [ -z "$repo_root" ]  && die "repo-root が指定されていません"
-  [ -z "$session_id" ] && die "--session-id が指定されていません"
   [ -z "$reviewer" ]   && die "--reviewer が指定されていません"
   [ -z "$round" ]      && die "--round が指定されていません"
   [ ! -d "$repo_root" ] && die "リポジトリが見つかりません: $repo_root"
+  # Fix A: --session-id 省略時は衝突不能な値を自前採番する（並列 worktree / 同一秒起動でも衝突しない）。
+  # 採番値は呼び出し側が下の SESSION_ID: 出力から拾い、round2+ / wait-review / cleanup で再利用する。
+  [ -z "$session_id" ] && session_id=$(rl_mint_session_id "$repo_root")
   case "$reviewer" in claude|codex) ;; *) die "--reviewer は claude または codex: $reviewer" ;; esac
   case "$round" in (''|*[!0-9]*) die "--round は整数で指定してください: $round" ;; esac
   [ "$round" -lt 1 ] && die "--round は 1 以上で指定してください"
@@ -347,12 +404,37 @@ cmd_review_once() {
 
   rl_build_reviewer_prompt "$round" "$base_ref" "$prev_review" "$reviewer" "$prompt_out_file" "$note_file" "$team" "$agmsg_home" > "$review_prompt"
 
+  # --- Fix B: (session, round) 二重起動ガード ---
+  # codex 2 体が同一 round-N-review.md を奪い合い verdict が壊れる事故の再発防止。
+  # launch をロックで排他し、その内側で既存 pane の生存を確認する（TOCTOU を避けるためロックが先）。
+  mkdir -p "$REVIEW_LOOP_DIR/$session_id"
+  local lock_dir="$REVIEW_LOOP_DIR/$session_id/round-${round}.lock"
+  if ! rl_try_lock "$lock_dir"; then
+    echo "STATUS: LAUNCH_IN_PROGRESS"
+    echo "SESSION_ID: $session_id"
+    echo "ROUND: $round"
+    echo "MESSAGE: round $round の launch が並行実行中です（二重起動を抑止）。完了後に再確認してください"
+    return 0
+  fi
+  trap 'rmdir "$lock_dir" 2>/dev/null || true' EXIT
+  local existing_pane; existing_pane=$(manifest_get "$session_id" ".panes[\"$round\"]")
+  if rl_pane_alive "$existing_pane"; then
+    echo "STATUS: ALREADY_RUNNING"
+    echo "SESSION_ID: $session_id"
+    echo "ROUND: $round"
+    echo "REVIEWER: $reviewer"
+    echo "PANE_ID: $existing_pane"
+    echo "REVIEW_OUT: $review_out"
+    echo "MESSAGE: round $round のレビュアーが既に pane $existing_pane で稼働中です（二重起動を抑止）"
+    return 0
+  fi
+
   local tmux_session; tmux_session=$(tmux display-message -p '#{session_name}')
   local pane
   pane=$(create_role_window "$tmux_session" "rl-rev-$round" "$work_dir") || die "reviewer window の作成に失敗しました"
 
   local rcmd
-  rcmd=$(rl_build_reviewer_cmd "$reviewer" "$work_dir" "$review_prompt" "$review_out" "$claude_sid" "$team" "$SELF" "$agmsg_home")
+  rcmd=$(rl_build_reviewer_cmd "$reviewer" "$work_dir" "$review_prompt" "$review_out" "$claude_sid" "$team" "$SELF" "$agmsg_home" "$round")
   launch_in_pane "$pane" "$work_dir" "$rcmd"
 
   [ "$round" -eq 1 ] && [ ! -f "$(manifest_path "$session_id")" ] && \
@@ -375,19 +457,24 @@ cmd_review_once() {
 # ============================================================
 
 cmd_notify_verdict() {
-  local team="" out_file="" to_name="$IMPLEMENTER_NAME" from_name="$REVIEWER_NAME" home=""
+  local team="" out_file="" to_name="" from_name="$REVIEWER_NAME" home="" round=""
   while [ $# -gt 0 ]; do
     case "$1" in
-      --team) team="$2"; shift 2 ;;
-      --out)  out_file="$2"; shift 2 ;;
-      --to)   to_name="$2"; shift 2 ;;
-      --from) from_name="$2"; shift 2 ;;
-      --home) home="$2"; shift 2 ;;
+      --team)  team="$2"; shift 2 ;;
+      --out)   out_file="$2"; shift 2 ;;
+      --to)    to_name="$2"; shift 2 ;;
+      --from)  from_name="$2"; shift 2 ;;
+      --home)  home="$2"; shift 2 ;;
+      --round) round="$2"; shift 2 ;;
       *) shift ;;
     esac
   done
   [ -z "$team" ]     && die "--team が指定されていません"
   [ -z "$out_file" ] && die "--out が指定されていません"
+  # 宛先は --to 明示があれば優先、なければ round 別 identity（Fix C: round ごとに inbox を分離）。
+  if [ -z "$to_name" ]; then
+    if [ -n "$round" ]; then to_name=$(implementer_round_name "$round"); else to_name="$IMPLEMENTER_NAME"; fi
+  fi
   # 実装役(wait-review)と同じ DB を参照させる。pane に env を伝播できないため --home で受けて export する。
   [ -n "$home" ] && export AGMSG_HOME="$home"
   command -v agmsg >/dev/null 2>&1 || die "agmsg が利用できません"
@@ -397,11 +484,16 @@ cmd_notify_verdict() {
   [ -f "$out_file" ] && verdict=$(rl_verdict_word < "$out_file")
   [ -z "$verdict" ] && verdict="CHANGES_REQUESTED"
 
-  agmsg send "$to_name" "REVIEW_RESULT: $verdict" --from "$from_name" --team "$team" \
+  # round を併記して受信側が round を突合できるようにする（round 不明なら従来形）。
+  local body
+  if [ -n "$round" ]; then body=$(rl_verdict_body "$verdict" "$round"); else body="REVIEW_RESULT: $verdict"; fi
+
+  agmsg send "$to_name" "$body" --from "$from_name" --team "$team" \
     || die "agmsg send に失敗しました（team=$team to=$to_name）"
 
   echo "STATUS: NOTIFIED"
   echo "VERDICT: $verdict"
+  echo "ROUND: $round"
   echo "TEAM: $team"
 }
 
@@ -437,10 +529,13 @@ cmd_wait_review() {
   [ -z "$team" ] && team="$session_id"
 
   # reviewer → implementer の REVIEW_RESULT メッセージを agmsg inbox のポーリングで待つ。
-  # inbox は取得分を既読化するので、前ラウンドのメッセージは前回 wait-review で消費済み。
-  local waited=0 verdict="" inbox_out=""
+  # Fix C: 受信 identity は round 別（implementer-r<round>）。round ごとに inbox が分かれるので、
+  # 残留・クロスラウンド・二重起動の verdict が混じっても取り違えない。inbox は破壊読みだが、
+  # この inbox にはこの round 宛てしか入らないため全件ドレインしても安全。
+  local recipient; recipient=$(implementer_round_name "$round")
+  local waited=0 verdict="" inbox_out="" msg_round=""
   while [ "$waited" -lt "$timeout" ]; do
-    inbox_out=$(agmsg inbox --name "$IMPLEMENTER_NAME" --team "$team" 2>/dev/null || true)
+    inbox_out=$(agmsg inbox --name "$recipient" --team "$team" 2>/dev/null || true)
     verdict=$(printf '%s\n' "$inbox_out" | rl_verdict_word)
     [ -n "$verdict" ] && break
     sleep 5; waited=$((waited + 5))
@@ -455,6 +550,9 @@ cmd_wait_review() {
     return 1
   fi
 
+  # 受信本文の round=<N> がこの round と一致するか突合（不一致は誤受信の兆候として警告）。
+  msg_round=$(printf '%s\n' "$inbox_out" | rl_verdict_round)
+
   # verdict 受信後に reviewer pane を後始末。claude は REPL に留まるので終了させる。
   # codex は exec 終了後に wrapper が送信しているので既にシェルへ戻っている。
   if [ "$reviewer" = claude ]; then
@@ -465,10 +563,25 @@ cmd_wait_review() {
 
   update_manifest "$session_id" ".rounds += [{round:$round, verdict:\"$verdict\", at:(now|todate)}]"
 
+  # Fix D: 受信 verdict と round-N-review.md 末尾の判定を突合。食い違えば二重起動・クロストークの兆候。
+  local file_verdict="" consistency="OK"
+  [ -f "$review_out" ] && file_verdict=$(rl_verdict_word < "$review_out")
+  if [ -n "$file_verdict" ] && [ "$file_verdict" != "$verdict" ]; then
+    consistency="INCONSISTENT(msg=$verdict,file=$file_verdict)"
+  fi
+  if [ -n "$msg_round" ] && [ "$msg_round" != "$round" ]; then
+    consistency="INCONSISTENT(msg_round=$msg_round,want=$round)"
+  fi
+
   echo "STATUS: REVIEWED"
   echo "ROUND: $round"
   echo "VERDICT: $verdict"
+  echo "CONSISTENCY: $consistency"
   echo "REVIEW_OUT: $review_out"
+  if [ "$consistency" != "OK" ]; then
+    echo "WARNING: verdict の整合に不一致を検出しました（二重起動 / クロストークの可能性）。round-${round}-review.md と pane を確認してください: $consistency"
+    tmux display-message -d 6000 "review-loop: round $round verdict 不一致 $consistency" 2>/dev/null || true
+  fi
 }
 
 # ============================================================
@@ -553,6 +666,8 @@ cmd_selftest() {
   assert_no_verdict "review prompt(claude): 判定パターン非混入(回帰防止)" "$rev_claude"
   assert_contains  "review prompt(claude): ファイル書き出し指示"     'round-1-review.md' "$rev_claude"
   assert_contains  "review prompt(claude): agmsg send 指示"         'agmsg send'        "$rev_claude"
+  assert_contains  "review prompt(claude): round 別の宛先 identity" "'implementer-r1'"  "$rev_claude"
+  assert_contains  "review prompt(claude): body に round 併記"       'round=1'           "$rev_claude"
   assert_contains  "review prompt(claude): team を quote して埋め込み" "--team 'reviewloop-x'" "$rev_claude"
   assert_contains  "review prompt(claude): AGMSG_HOME 伝播"         'AGMSG_HOME='       "$rev_claude"
   # AGMSG_HOME 未指定なら prefix を付けない（両者とも既定 DB）
@@ -564,7 +679,8 @@ cmd_selftest() {
 
   # --- レビュアーコマンド生成 ---
   local c
-  c=$(rl_build_reviewer_cmd codex /w /p/rv /o/rev.md "" reviewloop-x /skills/review-loop.sh /home/u/.agents/skills/agmsg)
+  c=$(rl_build_reviewer_cmd codex /w /p/rv /o/rev.md "" reviewloop-x /skills/review-loop.sh /home/u/.agents/skills/agmsg 2)
+  assert_contains "cmd codex reviewer: round 引き渡し"  "--round '2'"        "$c"
   assert_contains "cmd codex reviewer: codex exec"      'codex exec'         "$c"
   assert_contains "cmd codex reviewer: read-only"       '-s read-only'       "$c"
   assert_contains "cmd codex reviewer: stdout 捕捉"     "> '/o/rev.md'"      "$c"
@@ -584,6 +700,31 @@ cmd_selftest() {
   assert_contains "cmd claude reviewer: --session-id"  "--session-id 'sid-rev'" "$c"
   assert_excludes "cmd claude reviewer: -p 不使用"     ' -p '            "$c"
   assert_excludes "cmd claude reviewer: --print 不使用" '--print'        "$c"
+
+  # --- round 別 identity / verdict payload（Fix C）---
+  assert_contains "implementer_round_name: round 別宛先" "implementer-r3" "$(implementer_round_name 3)"
+  assert_contains "verdict body: verdict 含む"           "APPROVED"        "$(rl_verdict_body APPROVED 2)"
+  assert_contains "verdict body: round 併記"             "round=2"         "$(rl_verdict_body APPROVED 2)"
+  # body から round / verdict を双方向に取り出せる
+  assert_contains "verdict round 抽出"                   "2"  "$(printf '%s\n' "$(rl_verdict_body CHANGES_REQUESTED 2)" | rl_verdict_round)"
+  assert_contains "verdict word: round 併記でも抽出可"   "CHANGES_REQUESTED" "$(printf '%s\n' "$(rl_verdict_body CHANGES_REQUESTED 2)" | rl_verdict_word)"
+
+  # --- (session, round) 二重起動ロック（Fix B）---
+  local ld="$tmp/lockdir"
+  check_true  "try_lock: 初回は取得できる" rl_try_lock "$ld"
+  check_false "try_lock: 2 回目は弾く（再入拒否）" rl_try_lock "$ld"
+  rmdir "$ld"
+  check_true  "try_lock: 解放後は再取得できる" rl_try_lock "$ld"
+  rmdir "$ld"
+
+  # --- session-id 採番（Fix A）: 衝突不能・文字種制約を満たす ---
+  local sid1 sid2
+  sid1=$(rl_mint_session_id /tmp/my-repo)
+  sid2=$(rl_mint_session_id /tmp/my-repo)
+  assert_contains "mint session-id: prefix"        "reviewloop-" "$sid1"
+  assert_contains "mint session-id: repo basename" "my-repo"     "$sid1"
+  check_true  "mint session-id: 文字種制約(英数 . _ -)を満たす" bash -c '[[ "'"$sid1"'" =~ ^[A-Za-z0-9._-]+$ ]]'
+  check_false "mint session-id: 同一 repo でも毎回異なる（衝突不能）" test "$sid1" = "$sid2"
 
   if [ "$fail" -eq 0 ]; then
     echo "SELFTEST: PASS"
