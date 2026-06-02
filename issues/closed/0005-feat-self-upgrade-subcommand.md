@@ -26,3 +26,8 @@ issue 0003 で単一バイナリ配布（GoReleaser + GitHub Releases）を整�
 - darwin / linux のみ対象（`.goreleaser.yaml` の対象 OS と一致。windows はリリース対象外）。symlink は `EvalSymlinks` で実体解決してから rename し、symlink を通常ファイルで潰さない。
 - GitHub token は `GITHUB_TOKEN` → `gh auth token` → 未認証の順でフォールバック（public repo なので未認証でも取得可、token があれば rate limit が緩む）。
 - agent-telemetry 版にあった `warnLegacyBinary`（旧 hitl-metrics バイナリ警告）は agmsg-go に該当しないため移植しない。
+
+## Superseded 2026-06-02
+
+[[0010-spec-remove-upgrade-subcommand]] により本コマンドは削除された。更新は `go install ...@latest`
+再実行に一本化。攻撃面（唯一のネットワーク向きコードパス）と core scope 外の保守対象を縮めるための判断。
