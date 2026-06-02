@@ -2,9 +2,9 @@
 
 > 共有 SQLite ファイル 1 個を通信路にした CLI AI エージェント間 IPC と、その上で動く協調ワークフロー（skills）を、1 つの binary から配る。デーモンなし・ネットワークなし。
 
-bash 製 [**fujibee/agmsg**](https://github.com/fujibee/agmsg) の Go fork。Claude Code / Codex / Gemini CLI などの CLI AI エージェントが、中央プロセス（broker / daemon）もネットワークも持たず、同じ SQLite ファイルへ直接読み書きして通信します。設計思想は **"No daemon, no network, no complexity"**。
+Claude Code / Codex / Gemini CLI などの CLI AI エージェントが、中央プロセス（broker / daemon）もネットワークも持たず、同じ SQLite ファイルへ直接読み書きして通信します。設計思想は **"No daemon, no network, no complexity"**。アイデアの元は bash 製の [**fujibee/agmsg**](https://github.com/fujibee/agmsg) です。
 
-**IPC コア（`agmsg` binary）は mechanism, not policy** を厳守し「IPC をどう使うか」を作り込みません。その上の協調ワークフローは、分離された opt-in な **skills 層**として同梱します。設計の正本は [design.md](./design.md)（スコープ境界は [§2.1](./design.md)、skills 層は [§13](./design.md)）。
+**IPC コア（`agmsg` binary）は mechanism, not policy** を厳守し「IPC をどう使うか」を作り込みません。その上の協調ワークフローは、分離された opt-in な **skills 層**として同梱します。設計の正本は [design.md](./design.md)（スコープ境界は [§2.1](./design.md)、skills 層は [§12](./design.md)）。
 
 ```sh
 go install github.com/ishii1648/agmsg-go/cmd/agmsg@latest   # IPC コアを入れる
@@ -31,7 +31,7 @@ Tier 2/3・配信モード（`monitor` / `turn` / `both` / `off`）・完全な�
 
 ## skills (dispatch / review-loop)
 
-IPC プリミティブを使う具体的なワークフローを、binary とは分離された **opt-in な policy 層**として同梱しています。`agmsg skills install` で `~/.claude/skills` 等に展開して使います（詳細は [design.md §13](./design.md)）。
+IPC プリミティブを使う具体的なワークフローを、binary とは分離された **opt-in な policy 層**として同梱しています。`agmsg skills install` で `~/.claude/skills` 等に展開して使います（詳細は [design.md §12](./design.md)）。
 
 | skill | 役割 |
 |---|---|

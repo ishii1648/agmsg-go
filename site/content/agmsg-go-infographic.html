@@ -1,0 +1,382 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>agmsg-go — エージェント間 IPC の仕組み</title>
+<style>
+  :root{
+    --bg:#0f1117; --panel:#181b24; --panel2:#1f2430; --ink:#e8ecf4;
+    --muted:#9aa6bd; --line:#2c3344;
+    --send:#4ea1ff; --recv:#34d399; --watch:#f59e0b; --wal:#c084fc;
+    --danger:#fb7185; --ok:#34d399; --accent:#7dd3fc;
+  }
+  *{box-sizing:border-box}
+  body{
+    margin:0; background:var(--bg); color:var(--ink);
+    font-family:"Hiragino Sans","Hiragino Kaku Gothic ProN","Yu Gothic",
+      "Noto Sans JP",system-ui,-apple-system,sans-serif;
+    line-height:1.7; -webkit-font-smoothing:antialiased;
+  }
+  .wrap{max-width:1040px; margin:0 auto; padding:40px 24px 80px}
+  .mono{font-family:"SF Mono",ui-monospace,"DejaVu Sans Mono",Menlo,Consolas,monospace}
+
+  header.hero{
+    border:1px solid var(--line); border-radius:18px; padding:34px 32px;
+    background:radial-gradient(120% 140% at 0% 0%,#1b2030 0%,#12141d 60%);
+    margin-bottom:30px;
+  }
+  .eyebrow{color:var(--accent); font-size:13px; letter-spacing:.18em;
+    text-transform:uppercase; margin:0 0 8px; font-weight:700}
+  h1{margin:0 0 6px; font-size:34px; letter-spacing:.01em}
+  h1 .mono{font-size:30px; color:var(--accent)}
+  .tagline{margin:10px 0 0; color:var(--muted); font-size:16px; max-width:760px}
+  .slogan{display:inline-block; margin-top:16px; padding:6px 14px;
+    border:1px dashed var(--line); border-radius:999px; color:var(--watch);
+    font-size:13px; font-weight:600; letter-spacing:.04em}
+
+  section{margin-top:34px}
+  .sec-h{display:flex; align-items:baseline; gap:12px; margin:0 0 16px}
+  .sec-n{font-size:13px; font-weight:800; color:var(--bg);
+    background:var(--accent); border-radius:7px; padding:2px 9px}
+  .sec-h h2{margin:0; font-size:22px}
+  .sec-h .sub{color:var(--muted); font-size:14px; margin-left:auto}
+
+  .panel{background:var(--panel); border:1px solid var(--line);
+    border-radius:14px; padding:22px 24px}
+  .grid2{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+  .grid3{display:grid; grid-template-columns:repeat(3,1fr); gap:14px}
+
+  .card{background:var(--panel2); border:1px solid var(--line);
+    border-radius:12px; padding:16px 18px}
+  .card h3{margin:0 0 8px; font-size:15px; display:flex; align-items:center; gap:8px}
+  .card p{margin:0; color:var(--muted); font-size:13.5px}
+  .card p + p{margin-top:8px}
+  .dot{width:9px; height:9px; border-radius:50%; flex:none}
+  .d-send{background:var(--send)} .d-recv{background:var(--recv)}
+  .d-watch{background:var(--watch)} .d-wal{background:var(--wal)}
+
+  .flow{display:grid; grid-template-columns:1fr auto 1.1fr auto 1fr;
+    align-items:center; gap:6px; text-align:center}
+  .node{background:var(--panel2); border:1px solid var(--line);
+    border-radius:12px; padding:16px 12px}
+  .node .ttl{font-weight:700; font-size:15px}
+  .node .desc{color:var(--muted); font-size:12px; margin-top:4px}
+  .node.send{border-color:var(--send)} .node.send .ttl{color:var(--send)}
+  .node.db{border-color:var(--wal); background:#211a2e}
+  .node.db .ttl{color:var(--wal)}
+  .node.recv{border-color:var(--recv)} .node.recv .ttl{color:var(--recv)}
+  .arrow{color:var(--muted); font-size:24px; font-weight:700}
+  .arrow small{display:block; font-size:10px; letter-spacing:.04em}
+
+  .vs{display:grid; grid-template-columns:1fr 1fr; gap:16px}
+  .vs .col{border-radius:12px; padding:18px; border:1px solid var(--line)}
+  .vs .old{background:#241a1c; border-color:#43292d}
+  .vs .new{background:#15241f; border-color:#1f4537}
+  .vs .blue{background:#13202b; border-color:#1d3a4d}
+  .vs .amber{background:#241f12; border-color:#473a1a}
+  .vs h3{margin:0 0 10px; font-size:15px}
+  .vs .old h3{color:var(--danger)} .vs .new h3{color:var(--ok)}
+  .vs .blue h3{color:var(--send)} .vs .amber h3{color:var(--watch)}
+  .vs ul{margin:0; padding-left:18px; color:var(--muted); font-size:13.5px}
+  .vs li{margin:5px 0}
+
+  table{width:100%; border-collapse:collapse; font-size:13.5px}
+  th,td{text-align:left; padding:10px 12px; border-bottom:1px solid var(--line); vertical-align:top}
+  th{color:var(--accent); font-size:12px; letter-spacing:.04em; text-transform:uppercase}
+  td .tag{font-weight:700}
+  td:first-child{white-space:nowrap; color:var(--muted)}
+
+  .codebox{background:#0b0d13; border:1px solid var(--line); border-radius:10px;
+    padding:14px 16px; color:#cdd6e6; font-size:13px; overflow-x:auto; white-space:pre}
+  .codebox .c{color:#6b7689}
+  .codebox .k{color:var(--send)} .codebox .g{color:var(--ok)}
+  .codebox .y{color:var(--watch)} .codebox .v{color:var(--wal)}
+
+  .note{margin-top:14px; padding:12px 16px; border-left:3px solid var(--watch);
+    background:#1d1c14; border-radius:0 8px 8px 0; font-size:13.5px; color:#e6dcc4}
+  .note b{color:var(--watch)}
+  .note.blue{border-left-color:var(--accent); background:#13202b; color:#d6ecf7}
+  .note.blue b{color:var(--accent)}
+  .note.green{border-left-color:var(--ok); background:#13241d; color:#cdeede}
+  .note.green b{color:var(--ok)}
+  .pill{display:inline-block; font-size:11px; font-weight:700; padding:2px 8px;
+    border-radius:6px; background:var(--panel2); border:1px solid var(--line); color:var(--muted)}
+
+  footer{margin-top:46px; padding-top:18px; border-top:1px solid var(--line);
+    color:var(--muted); font-size:12.5px; display:flex; justify-content:space-between; flex-wrap:wrap; gap:8px}
+
+  @media (max-width:760px){
+    .grid2,.grid3,.vs{grid-template-columns:1fr}
+    .flow{grid-template-columns:1fr; gap:4px}
+    .arrow{transform:rotate(90deg); margin:2px 0}
+    h1{font-size:26px}
+  }
+  @media print{
+    body{background:#fff; color:#111}
+    .panel,.card,.node,.codebox{background:#fff; border-color:#ccc}
+    .wrap{max-width:none}
+    section{break-inside:avoid}
+  }
+</style>
+</head>
+<body>
+<div class="wrap">
+
+  <header class="hero">
+    <p class="eyebrow">CLI AI エージェント間 IPC インフラ</p>
+    <h1><span class="mono">agmsg-go</span> はどう通信するか</h1>
+    <p class="tagline">
+      共有された <b>1 個の SQLite ファイル</b>を「郵便ポスト」にして、Claude Code / Codex / Gemini などの
+      エージェントが直接読み書きで連絡し合う。中央プロセス(broker / daemon)もネットワークも持たない。
+      設計のアイデアは bash 製 <span class="mono">fujibee/agmsg</span> に由来。
+    </p>
+    <span class="slogan">“No daemon, no network, no complexity”</span>
+  </header>
+
+  <!-- 1. 全体像 -->
+  <section>
+    <div class="sec-h"><span class="sec-n">01</span><h2>全体像 — 中央プロセスは存在しない</h2>
+      <span class="sub">複数リーダ + 1 ライタ</span></div>
+    <div class="panel">
+      <div class="flow">
+        <div class="node send">
+          <div class="ttl">● Agent A</div>
+          <div class="desc"><span class="mono">agmsg send</span><br>= INSERT</div>
+        </div>
+        <div class="arrow">▶<small>INSERT</small></div>
+        <div class="node db">
+          <div class="ttl">messages.db</div>
+          <div class="desc">共有 SQLite (WAL)<br>= 唯一の通信路</div>
+        </div>
+        <div class="arrow">▶<small>SELECT</small></div>
+        <div class="node recv">
+          <div class="ttl">● Agent B / C</div>
+          <div class="desc"><span class="mono">inbox</span> / <span class="mono">watch</span><br>= 受信</div>
+        </div>
+      </div>
+      <div class="note blue">
+        全員が<b>同じ単一バイナリ <span class="mono">agmsg</span> のサブコマンド</b>を叩くだけ。
+        <span class="mono">agmsg</span> 自身は常駐 broker を持たない。逐次書き込み + 同時読み取りを成立させる土台が <b>WAL モード</b>(→ 07)。
+      </div>
+    </div>
+  </section>
+
+  <!-- 2. アイデンティティ -->
+  <section>
+    <div class="sec-h"><span class="sec-n">02</span><h2>宛先 = <span class="mono" style="font-size:18px">(name, team)</span></h2>
+      <span class="sub">project path / type はメタデータ</span></div>
+    <div class="grid3">
+      <div class="card"><h3><span class="dot d-send"></span>join で参加</h3>
+        <p><span class="mono">agmsg join &lt;team&gt;</span> でチームに登録。<span class="mono">teams/&lt;team&gt;/config.json</span> に registration が積まれる。通信の前提。</p></div>
+      <div class="card"><h3><span class="dot d-recv"></span>名前 + チームで識別</h3>
+        <p>「名前とチームの組」で同一性を判定。同じ <span class="mono">(name, team)</span> なら別 project から join しても<b>同一アイデンティティ</b>。送受信はこの組で絞られ、無関係な第三者には届かない。</p></div>
+      <div class="card"><h3><span class="dot d-watch"></span>1 人で複数役も</h3>
+        <p><span class="mono">actas</span> / <span class="mono">drop</span> で 1 セッションが reviewer・implementer など複数の役割を演じ分けられる。</p></div>
+    </div>
+  </section>
+
+  <!-- 3. メッセージ1通の流れ -->
+  <section>
+    <div class="sec-h"><span class="sec-n">03</span><h2>メッセージ 1 通の流れ</h2>
+      <span class="sub">送信 = INSERT / 受信 = 2 経路</span></div>
+    <div class="grid2">
+      <div class="card" style="border-color:var(--send)">
+        <h3><span class="dot d-send"></span>送信 <span class="mono" style="font-size:13px;color:var(--muted)">agmsg send</span></h3>
+        <p>1 行 INSERT するだけ。<b style="color:var(--send)">placeholder バインド(?)</b> で渡すため、本文に <span class="mono">' ; 改行</span> が含まれても SQL インジェクション・構文破壊が起きない。文字列連結で SQL を組み立てない。</p>
+      </div>
+      <div class="card" style="border-color:var(--recv)">
+        <h3><span class="dot d-recv"></span>受信は 2 つ(性質が違う → 05)</h3>
+        <p><b style="color:var(--recv)">inbox</b>(消費): 未読 <span class="mono">read_at IS NULL</span> を取得し既読化。<br>
+        <b style="color:var(--watch)">watch</b>(閲覧): <span class="mono">id &gt; watermark</span> を既読化せず stream。</p>
+      </div>
+    </div>
+    <div class="codebox" style="margin-top:16px"><span class="c">-- messages テーブル</span>
+<span class="k">CREATE TABLE</span> messages (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,  <span class="c">-- 単調増加 → watermark に使う</span>
+  team TEXT, from_agent TEXT, to_agent TEXT, body TEXT,
+  created_at TEXT,
+  read_at   TEXT                                <span class="c">-- NULL = 未読</span>
+);</div>
+  </section>
+
+  <!-- 4. 受信検知: fsnotify + ポーリング保険 -->
+  <section>
+    <div class="sec-h"><span class="sec-n">04</span><h2>受信検知 — fsnotify(主) + ポーリング保険</h2>
+      <span class="sub">internal/watch</span></div>
+    <div class="vs">
+      <div class="col blue">
+        <h3>主: fsnotify(DB ディレクトリ監視)</h3>
+        <ul>
+          <li>OS のファイル変更通知で<b>実質即時</b>にトリガ</li>
+          <li>イベントのバーストは <span class="mono">50ms</span> debounce で 1 回に畳む</li>
+          <li>監視対象は DB <b>ディレクトリ全体</b>(WAL の罠 → 07)</li>
+        </ul>
+      </div>
+      <div class="col amber">
+        <h3>保険: 30 秒ポーリング</h3>
+        <ul>
+          <li>実体は <span class="mono">time.Ticker</span> 1 個</li>
+          <li>fsnotify が取りこぼしても<b>最大 30 秒で必ず追いつく</b></li>
+          <li>主が即時なので案 A の 5 秒より長くしアイドルコスト減</li>
+        </ul>
+      </div>
+    </div>
+    <div class="codebox" style="margin-top:16px"><span class="c">// 2 つのトリガ経路が「同じ取得処理 OnTrigger」を叩く (watch.go)</span>
+<span class="k">for</span> {
+  <span class="k">select</span> {
+  <span class="k">case</span> &lt;-ticker.C:        <span class="y">// ★ ポーリング保険 (30s)</span>
+      cfg.OnTrigger(ctx)
+  <span class="k">case</span> &lt;-events:          <span class="c">// fsnotify(主) → debounce を張る</span>
+      <span class="k">if</span> debounce == nil { debounce = time.After(50*ms) }
+  <span class="k">case</span> &lt;-debounce:        <span class="c">// 即時取得</span>
+      cfg.OnTrigger(ctx)
+  }
+}
+<span class="c">// OnTrigger = "id &gt; watermark の SELECT" 一本。べき等なので二重発火しても無害。</span>
+<span class="c">// fsnotify が死ぬと events を nil 化 → select が選ばなくなり ticker だけで回る(fallback)。</span></div>
+    <div class="note">
+      <b>狙いは遅延短縮ではなく「アイドル効率」。</b> 何も来ない間はプロセスを fork せず静かに待つ。
+      受信の数秒〜数十秒の遅延は LLM の推論時間に埋もれて体感差にならない、という割り切り。
+    </div>
+  </section>
+
+  <!-- 5. watch ≠ inbox -->
+  <section>
+    <div class="sec-h"><span class="sec-n">05</span><h2>watch ≠ inbox — 閲覧と消費は独立</h2>
+      <span class="sub">なぜ分けるのか</span></div>
+    <table>
+      <tr><th></th><th>watch(閲覧 / 通知)</th><th>inbox(消費 / 処理台帳)</th></tr>
+      <tr><td>実体</td><td class="mono">store.Since</td><td class="mono">store.TakeUnread</td></tr>
+      <tr><td>SQL</td><td class="mono">SELECT WHERE id &gt; ?</td><td class="mono">UPDATE SET read_at WHERE read_at IS NULL RETURNING</td></tr>
+      <tr><td>未読の判定軸</td><td><b style="color:var(--watch)">watermark</b>(プロセスメモリ・揮発)</td><td><b style="color:var(--recv)">read_at</b>(DB 永続)</td></tr>
+      <tr><td>副作用</td><td>なし(read-only)</td><td>read_at を埋める = claim</td></tr>
+      <tr><td>比喩</td><td><span class="mono">tail -f</span> で眺める</td><td>受信トレイから開封して処理</td></tr>
+    </table>
+    <div class="note green" style="margin-top:18px">
+      <b>2 系統は完全に無干渉。</b> watch で眺めても <span class="mono">read_at</span> は NULL のまま →
+      後から <span class="mono">inbox</span> を叩けば同じ 1 件がまだ「未読」として取れる。「眺めた」≠「処理した」。
+    </div>
+    <div class="grid3" style="margin-top:14px">
+      <div class="card"><h3><span class="dot d-recv"></span>① both の二重安全網</h3>
+        <p>watch(揮発 watermark)はプロセス死・再起動で取りこぼしうる。永続 <span class="mono">read_at</span> が残るから <span class="mono">check-inbox</span> が確実に回収できる。</p></div>
+      <div class="card"><h3><span class="dot d-watch"></span>② watch を冪等に再起動</h3>
+        <p><span class="mono">/clear</span> や <span class="mono">--resume</span> で再起動するたび <span class="mono">MAX(id)</span> から「今から先」を見るだけ。永続状態を汚さない。</p></div>
+      <div class="card"><h3><span class="dot d-send"></span>③ mechanism, not policy</h3>
+        <p>「読んだら消すか」は利用側の選択。binary は閲覧と消費の 2 プリミティブを提供し、組み合わせは委ねる。</p></div>
+    </div>
+  </section>
+
+  <!-- 6. 配信モード + No daemon -->
+  <section>
+    <div class="sec-h"><span class="sec-n">06</span><h2>配信モードと「No daemon」の正体</h2>
+      <span class="sub">どう気づかせ、何を常駐させないか</span></div>
+    <div class="grid2">
+      <div class="card">
+        <h3><span class="dot d-recv"></span>4 つの配信モード</h3>
+        <table style="margin-top:2px">
+          <tr><td class="tag" style="color:var(--recv)">monitor</td><td>SessionStart → watch が常駐 stream(即時)</td></tr>
+          <tr><td class="tag" style="color:var(--send)">turn</td><td>Stop フック → ターン間に check-inbox</td></tr>
+          <tr><td class="tag" style="color:var(--watch)">both</td><td>monitor 主 + turn 保険(取りこぼし防止)</td></tr>
+          <tr><td class="tag" style="color:var(--muted)">off</td><td>自動配信なし(手動 inbox)</td></tr>
+        </table>
+      </div>
+      <div class="card">
+        <h3><span class="dot d-watch"></span>watch は常駐する。だが daemon ではない</h3>
+        <p>ポーリングする以上「走り続けるプロセス」= <span class="mono">agmsg watch</span> は実在し常駐する。<b>常駐ゼロではない</b>。</p>
+        <p>daemon でないのは、watch が独立自走せず<b>ホストのセッション寿命に自分の寿命を預ける</b>から。親が消えれば self-terminate する。</p>
+      </div>
+    </div>
+    <div class="vs" style="margin-top:16px">
+      <div class="col old">
+        <h3>✗ 却下: 独立 broker daemon(案 C)</h3>
+        <ul>
+          <li>誰が起動・再起動・kill する?</li>
+          <li>複数バージョンが同時に走ったら?</li>
+          <li>= 自分で管理する常駐プロセスの<b>ライフサイクル地獄</b></li>
+        </ul>
+      </div>
+      <div class="col new">
+        <h3>✓ 採用: watch が寿命をホストに預ける</h3>
+        <ul>
+          <li>起動はホストの SessionStart フック</li>
+          <li>親が死ねば watch も死ぬ(孤児化しない)</li>
+          <li>= 管理地獄をホスト側に肩代わりさせて回避</li>
+        </ul>
+      </div>
+    </div>
+    <div class="note">
+      <b>「No daemon」は常駐ゼロの意味ではない。</b> 否定しているのは「<b>自分で管理する独立常駐 broker</b>」。
+      watch の常駐管理(二重起動防止・孤児回収・世代管理)を型とテストで安全にした点が本質。
+    </div>
+  </section>
+
+  <!-- 7. WAL -->
+  <section>
+    <div class="sec-h"><span class="sec-n">07</span><h2>WAL モード <span style="font-size:14px;color:var(--muted)">Write-Ahead Logging</span></h2>
+      <span class="sub">同時読み書きを成立させる土台</span></div>
+    <div class="vs">
+      <div class="col old">
+        <h3>✗ 既定: rollback journal</h3>
+        <ul>
+          <li>本体ファイルを<b>直接上書き</b>(元の内容を journal に退避)</li>
+          <li>書き込み中は読めない / 読む間は書けない</li>
+          <li><b>書き手と読み手が排他</b> → 多人数で待たされる</li>
+        </ul>
+      </div>
+      <div class="col new">
+        <h3>✓ WAL モード(agmsg 採用)</h3>
+        <ul>
+          <li>本体は触らず変更を <span class="mono">-wal</span> に<b>追記</b></li>
+          <li>読み取りは「本体 + -wal」を合成して最新を見る</li>
+          <li><b>複数リーダ + 1 ライタが同時に動ける</b></li>
+        </ul>
+      </div>
+    </div>
+    <div class="grid3" style="margin-top:16px">
+      <div class="card"><h3><span class="dot d-wal"></span>3 つのファイル</h3>
+        <p><span class="mono">messages.db</span>(本体) / <span class="mono">-wal</span>(追記先) / <span class="mono">-shm</span>(索引・共有メモリ)。</p></div>
+      <div class="card"><h3><span class="dot d-wal"></span>checkpoint</h3>
+        <p>溜まった <span class="mono">-wal</span> を本体へ反映し空に戻す(truncate / 再作成)お掃除。</p></div>
+      <div class="card" style="border-color:var(--danger)"><h3><span class="dot" style="background:var(--danger)"></span>監視の罠</h3>
+        <p>書き込みは <span class="mono">-wal</span> に乗るので <b style="color:var(--danger)">本体だけ監視すると発火しない</b>。だから DB <b>ディレクトリ全体</b>を監視する(→ 04)。</p></div>
+    </div>
+  </section>
+
+  <!-- 8. mechanism not policy -->
+  <section>
+    <div class="sec-h"><span class="sec-n">08</span><h2>最大の設計判断 — mechanism, not policy</h2>
+      <span class="sub">何を作り込まないか</span></div>
+    <div class="panel">
+      <div class="grid2" style="gap:20px">
+        <div>
+          <h3 style="margin:0 0 8px;color:var(--accent);font-size:15px">binary が持つ＝ mechanism(不可侵のコア)</h3>
+          <table>
+            <tr><td class="tag mono" style="color:var(--send)">send</td><td>宛先へ INSERT</td></tr>
+            <tr><td class="tag mono" style="color:var(--recv)">inbox</td><td>未読 SELECT + 既読化(消費)</td></tr>
+            <tr><td class="tag mono" style="color:var(--watch)">watch</td><td>id &gt; watermark を stream(閲覧)</td></tr>
+            <tr><td class="tag mono" style="color:var(--accent)">join / whoami</td><td>宛先解決・自己同定</td></tr>
+          </table>
+        </div>
+        <div>
+          <h3 style="margin:0 0 8px;color:var(--muted);font-size:15px">binary が持たない＝ policy(利用側 / skills 層)</h3>
+          <p style="color:var(--muted);font-size:13.5px;margin:0 0 10px">
+            「誰にどう振り分けるか」「レビュー→修正をどう回すか」は作り込まない。代表的な使い方だけ
+            <b>分離・opt-in な skills 層</b>として同梱(binary を IPC 経由で呼ぶ消費者)。</p>
+          <div class="card" style="padding:12px 14px"><h3 style="font-size:14px"><span class="dot d-send"></span>dispatch</h3>
+            <p>別リポで agent を worktree+tmux 起動 → <span class="mono">join</span> で team に auto-join。</p></div>
+          <div class="card" style="padding:12px 14px;margin-top:10px"><h3 style="font-size:14px"><span class="dot d-recv"></span>review-loop</h3>
+            <p>逆 agent に反復レビューさせ収束。verdict 通知を <span class="mono">send</span>/<span class="mono">inbox</span> に載せる。</p></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <footer>
+    <span>agmsg-go — 共有 SQLite による CLI AI エージェント間 IPC ／ 設計の正本: <span class="mono">design.md</span></span>
+    <span>idea from fujibee/agmsg ・ MIT</span>
+  </footer>
+
+</div>
+</body>
+</html>
