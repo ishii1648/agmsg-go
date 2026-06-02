@@ -27,7 +27,7 @@ agmsg skills install                                        # 協調ワークフ
 | `agmsg join <team>` / `agmsg leave <team>` | チーム参加 / 離脱（宛先解決の前提） |
 | `agmsg whoami` | 自アイデンティティの表示 |
 
-Tier 2/3・配信モード（`monitor` / `turn` / `both` / `off`）・完全な対応表は [design.md §7](./design.md) / [§10](./design.md) を参照。運用補助として `agmsg version` / `agmsg upgrade [--check]`（GitHub Releases から最新版を取得して自身を置き換える）があります。
+Tier 2/3・配信モード（`monitor` / `turn` / `both` / `off`）・完全な対応表は [design.md §7](./design.md) / [§10](./design.md) を参照。運用補助として `agmsg version` があります。更新は `go install github.com/ishii1648/agmsg-go/cmd/agmsg@latest` の再実行で行います（自己更新コマンドは持ちません）。
 
 ## skills (dispatch / review-loop)
 
