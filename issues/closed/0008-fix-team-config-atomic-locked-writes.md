@@ -1,6 +1,7 @@
 ---
 decision_type: implementation
 tags: [config, identity, concurrency, integrity]
+closed_at: 2026-06-02
 ---
 
 # team config の書き込みをアトミック化し join/leave を直列化する

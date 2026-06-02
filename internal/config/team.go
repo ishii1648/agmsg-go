@@ -77,7 +77,14 @@ func LoadTeam(l paths.Layout, team string) (TeamConfig, bool, error) {
 	return tc, true, nil
 }
 
-// Save は config を team ディレクトリへ書き出す（インデント付き）。
+// Save は config を team ディレクトリへアトミックに書き出す（インデント付き）。
+//
+// 同一ディレクトリに temp ファイルを書いてから os.Rename で差し替える。
+// intra-directory rename は atomic なので、書き込み途中でプロセスが死んでも
+// 本体ファイルは常に valid JSON を保ち（torn JSON で後続 LoadTeam が落ちない）、
+// reader は旧 / 新どちらか完全な内容だけを見る。lost update の防止は呼び出し側
+// （withTeamLock）が担う。mode は private home 下で必要十分な 0o600
+// （os.CreateTemp の既定）。
 func (tc TeamConfig) Save(l paths.Layout, team string) error {
 	if err := l.EnsureTeamDir(team); err != nil {
 		return err
@@ -87,7 +94,22 @@ func (tc TeamConfig) Save(l paths.Layout, team string) error {
 		return err
 	}
 	b = append(b, '\n')
-	return os.WriteFile(l.TeamConfigPath(team), b, 0o644)
+
+	dir := filepath.Dir(l.TeamConfigPath(team))
+	tmp, err := os.CreateTemp(dir, "config-*.tmp")
+	if err != nil {
+		return err
+	}
+	// rename 成功後は no-op（Remove は存在しない名前で error を返すだけ）。
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(b); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), l.TeamConfigPath(team))
 }
 
 // nowISO は created_at に使う UTC タイムスタンプ。
@@ -102,63 +124,75 @@ func Join(l paths.Layout, team, name string, reg identity.Registration) (added b
 	if err := identity.ValidateType(reg.Type); err != nil {
 		return false, err
 	}
-	tc, ok, err := LoadTeam(l, team)
-	if err != nil {
-		return false, err
-	}
-	if !ok {
-		tc = TeamConfig{Name: team, Agents: map[string]AgentEntry{}, CreatedAt: nowISO()}
-	}
-	entry := tc.Agents[name]
-	for _, r := range entry.Registrations {
-		if r.Match(reg.Type, reg.Project) {
-			return false, nil // 既に登録済み
+	// load → mutate → save 全体を team ロックで囲み、並行 Join/Leave による
+	// lost update を防ぐ。
+	err = withTeamLock(l, team, func() error {
+		tc, ok, err := LoadTeam(l, team)
+		if err != nil {
+			return err
 		}
-	}
-	entry.Registrations = append(entry.Registrations, reg)
-	tc.Agents[name] = entry
-	if err := tc.Save(l, team); err != nil {
-		return false, err
-	}
-	return true, nil
+		if !ok {
+			tc = TeamConfig{Name: team, Agents: map[string]AgentEntry{}, CreatedAt: nowISO()}
+		}
+		entry := tc.Agents[name]
+		for _, r := range entry.Registrations {
+			if r.Match(reg.Type, reg.Project) {
+				return nil // 既に登録済み（added=false のまま）
+			}
+		}
+		entry.Registrations = append(entry.Registrations, reg)
+		tc.Agents[name] = entry
+		if err := tc.Save(l, team); err != nil {
+			return err
+		}
+		added = true
+		return nil
+	})
+	return added, err
 }
 
 // Leave は team から (name) の (type, project) Registration を取り除く。
 // 残り Registration が無くなれば agent エントリ自体を削除する。
 // 何か取り除いた場合 removed=true を返す。
 func Leave(l paths.Layout, team, name string, reg identity.Registration) (removed bool, err error) {
-	tc, ok, err := LoadTeam(l, team)
-	if err != nil || !ok {
-		return false, err
-	}
-	entry, exists := tc.Agents[name]
-	if !exists {
-		return false, nil
-	}
-	kept := entry.Registrations[:0]
-	for _, r := range entry.Registrations {
-		if r.Match(reg.Type, reg.Project) {
-			removed = true
-			continue
+	// load → mutate → save 全体を team ロックで囲む（Join と同様）。
+	err = withTeamLock(l, team, func() error {
+		tc, ok, err := LoadTeam(l, team)
+		if err != nil || !ok {
+			return err
 		}
-		kept = append(kept, r)
-	}
-	if !removed {
-		return false, nil
-	}
-	if len(kept) == 0 {
-		delete(tc.Agents, name)
-	} else {
-		entry.Registrations = kept
-		tc.Agents[name] = entry
-	}
-	if err := tc.Save(l, team); err != nil {
+		entry, exists := tc.Agents[name]
+		if !exists {
+			return nil
+		}
+		kept := entry.Registrations[:0]
+		for _, r := range entry.Registrations {
+			if r.Match(reg.Type, reg.Project) {
+				removed = true
+				continue
+			}
+			kept = append(kept, r)
+		}
+		if !removed {
+			return nil
+		}
+		if len(kept) == 0 {
+			delete(tc.Agents, name)
+		} else {
+			entry.Registrations = kept
+			tc.Agents[name] = entry
+		}
+		return tc.Save(l, team)
+	})
+	if err != nil {
 		return false, err
 	}
-	return true, nil
+	return removed, nil
 }
 
 // ListTeams は teams ディレクトリに存在するチーム名を返す。
+// team の存在は config.json の有無で定義する。Leave がロック取得のために作る
+// config.lock だけの空ディレクトリ（登録 0 件）は team として数えない。
 func ListTeams(l paths.Layout) ([]string, error) {
 	ents, err := os.ReadDir(l.TeamsDir())
 	if errors.Is(err, os.ErrNotExist) {
@@ -169,9 +203,16 @@ func ListTeams(l paths.Layout) ([]string, error) {
 	}
 	var teams []string
 	for _, e := range ents {
-		if e.IsDir() {
-			teams = append(teams, e.Name())
+		if !e.IsDir() {
+			continue
 		}
+		if _, err := os.Stat(l.TeamConfigPath(e.Name())); err != nil {
+			if errors.Is(err, os.ErrNotExist) {
+				continue // config.json が無いディレクトリは team ではない
+			}
+			return nil, err // 権限エラー等の実エラーは握り潰さず表面化させる
+		}
+		teams = append(teams, e.Name())
 	}
 	return teams, nil
 }
