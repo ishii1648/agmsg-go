@@ -95,11 +95,10 @@ bash ~/.claude/skills/dispatch/dispatch.sh launch "<repo>" "<prompt>" --branch "
 - `--prompt-file <path>`: prompt を直接渡す代わりにファイル経由で渡す（読み込み後に削除される）
 - `--agmsg-team <team>`: auto-join する agmsg team を上書き（既定: 親の `AGMSG_TEAM` → repo basename）
 - `--agmsg-name <name>`: auto-join する agmsg の name を上書き（既定: ブランチ名の `/`→`-` → window 名）
-- `--no-agmsg`: agmsg への auto-join を無効化する
 
 ### agmsg auto-join
 
-`agmsg` が PATH にある場合（`--no-agmsg` 指定時を除く）、dispatch は起動した agent の identity `(name, team)` を `agmsg join` で登録する。これにより親 session から `agmsg send <name> --team <team>` でメッセージを送れ、起動 agent は work_dir に居れば `(type, project)` 自動解決で同じ identity に解決される（claude→type `claude-code`、codex→type `codex`）。`agmsg` が無ければ join をスキップして従来どおり起動する（破壊しない）。登録した identity は `LAUNCHED` 出力の `AGMSG:` 行に表示される。
+`agmsg` は**必須**。PATH に無い場合は起動前に落とす（auto-join が dispatch の前提のため）。dispatch は起動した agent の identity `(name, team)` を `agmsg join` で登録する。これにより親 session から `agmsg send <name> --team <team>` でメッセージを送れ、起動 agent は work_dir に居れば `(type, project)` 自動解決で同じ identity に解決される（claude→type `claude-code`、codex→type `codex`）。`agmsg join` に失敗した場合も落とす。登録した identity は `LAUNCHED` 出力の `AGMSG:` 行に表示される。
 
 `AGMSG_HOME`（DB の置き場所）が設定されている場合は、join 先と起動 agent が同じ DB を見るよう launcher コマンドへ `env AGMSG_HOME=...` で伝播する（未設定なら両者とも既定 `~/.agents/skills/agmsg`）。`work_dir` / `AGMSG_HOME` に single quote を含むパスは pane へのコマンド送出が壊れるため拒否する。
 
@@ -107,7 +106,7 @@ bash ~/.claude/skills/dispatch/dispatch.sh launch "<repo>" "<prompt>" --branch "
 
 | STATUS | 対応 |
 |--------|------|
-| `LAUNCHED` | 完了報告（SESSION, WINDOW, PANE_ID, REPO, WORK_DIR、auto-join 時は AGMSG を表示） |
+| `LAUNCHED` | 完了報告（SESSION, WINDOW, PANE_ID, REPO, WORK_DIR, AGMSG を表示） |
 | `ERROR` | MESSAGE を表示して終了 |
 
 ### Step 6: 完了報告
@@ -118,5 +117,5 @@ claude を起動しました
   作業ディレクトリ: <WORK_DIR>
   セッション: <SESSION>
   ウィンドウ: <WINDOW>
-  agmsg: <AGMSG>   # auto-join した場合のみ
+  agmsg: <AGMSG>
 ```
