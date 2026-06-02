@@ -213,6 +213,11 @@ cmd_launch() {
         agmsg_name="$2"
         shift 2
         ;;
+      --*)
+        # 未知の --* は silent に捨てず明示的に落とす。撤去した --no-agmsg を旧利用者が渡しても
+        # 黙って無視されず（required の意図に反して join が走るのを防ぐ）、タイポも早期に検出できる。
+        die "未知のオプションです: $1"
+        ;;
       *)
         if [ -z "$repo" ]; then
           repo="$1"
