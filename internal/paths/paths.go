@@ -67,6 +67,13 @@ func (l Layout) TeamConfigPath(team string) string {
 	return filepath.Join(l.root, "teams", team, "config.json")
 }
 
+// TeamLockPath は指定チームの read-modify-write を直列化する flock 用
+// ロックファイルの絶対パスを返す。config.json は atomic rename で inode が
+// 差し替わるため、ロック対象は rename されない専用ファイルに分ける。
+func (l Layout) TeamLockPath(team string) string {
+	return filepath.Join(l.root, "teams", team, "config.lock")
+}
+
 // EnsureDBDir は DB ディレクトリを作成する（既存なら何もしない）。
 func (l Layout) EnsureDBDir() error {
 	return os.MkdirAll(l.DBDir(), 0o755)
