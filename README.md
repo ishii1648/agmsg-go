@@ -2,7 +2,7 @@
 
 > 共有 SQLite ファイル 1 個を通信路にした CLI AI エージェント間 IPC と、その上で動く協調ワークフロー（skills）を、1 つの binary から配る。デーモンなし・ネットワークなし。
 
-Claude Code / Codex / Gemini CLI などの CLI AI エージェントが、中央プロセス（broker / daemon）もネットワークも持たず、同じ SQLite ファイルへ直接読み書きして通信します。設計思想は **"No daemon, no network, no complexity"**。アイデアの元は bash 製の [**fujibee/agmsg**](https://github.com/fujibee/agmsg) です。
+Claude Code / Codex / Gemini CLI などの CLI AI エージェントが、中央プロセス（broker / daemon）もネットワークも持たず、同じ SQLite ファイルへ直接読み書きして通信します。設計思想は **"No daemon, no network, no complexity"**。bash 製の [**fujibee/agmsg**](https://github.com/fujibee/agmsg) のフォークで、その設計とアイデアを Go で再実装したものです。
 
 **IPC コア（`agmsg` binary）は mechanism, not policy** を厳守し「IPC をどう使うか」を作り込みません。その上の協調ワークフローは、分離された opt-in な **skills 層**として同梱します。設計の正本は [design.md](./design.md)（スコープ境界は [§2.1](./design.md)、skills 層は [§12](./design.md)）。
 
@@ -42,6 +42,7 @@ IPC プリミティブを使う具体的なワークフローを、binary とは
 
 ## ドキュメント
 
+- [📊 アーキテクチャ インフォグラフィック](https://ishii1648.github.io/agmsg-go/) — エージェント間 IPC の全体像をビジュアルで解説（GitHub Pages）
 - [setup.md](./setup.md) — セットアップ手順（binary の導入・skills の展開・Gatekeeper 解除・動作確認）
 - [design.md](./design.md) — 設計判断とその根拠（アーキテクチャ / データモデル / 受信検知 / ライフサイクル管理 / トレードオフ）
 
