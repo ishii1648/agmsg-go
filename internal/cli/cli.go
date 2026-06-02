@@ -254,7 +254,6 @@ func Run(ctx context.Context, e Env, args []string) error {
 		"leave":  {"name", "type", "project"},
 		"whoami":  {"type", "project"},
 		"skills":  {"dest", "force"},
-		"upgrade": {"check"},
 	}
 	allow, known := allowed[sub]
 	if !known {
@@ -280,8 +279,6 @@ func Run(ctx context.Context, e Env, args []string) error {
 		return cmdWhoami(ctx, e, l, f)
 	case "skills":
 		return cmdSkills(ctx, e, l, f)
-	case "upgrade":
-		return cmdUpgrade(ctx, e, l, f)
 	default:
 		// allowed マップと switch は同期している（到達しない）。
 		printUsage(e.Stderr)
@@ -301,7 +298,6 @@ Usage:
   agmsg whoami            [--type <type>] [--project <path>]
   agmsg skills install    [--dest <dir>] [--force]
   agmsg skills list
-  agmsg upgrade           [--check]
   agmsg version
 
 識別子 (name, team) はフラグ／環境変数 (AGMSG_NAME, AGMSG_TEAM, AGMSG_TYPE,
