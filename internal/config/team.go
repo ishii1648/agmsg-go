@@ -207,7 +207,10 @@ func ListTeams(l paths.Layout) ([]string, error) {
 			continue
 		}
 		if _, err := os.Stat(l.TeamConfigPath(e.Name())); err != nil {
-			continue // config.json が無いディレクトリは team ではない
+			if errors.Is(err, os.ErrNotExist) {
+				continue // config.json が無いディレクトリは team ではない
+			}
+			return nil, err // 権限エラー等の実エラーは握り潰さず表面化させる
 		}
 		teams = append(teams, e.Name())
 	}
