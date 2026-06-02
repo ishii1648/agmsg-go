@@ -167,8 +167,8 @@ cmd_list_repos() {
 cmd_launch() {
   local repo="" prompt="" prompt_file_arg="" session_name="" window_name="" branch_name="" no_worktree=false no_prompt=false launcher="claude"
   # agmsg 連携: 起動 agent を team に auto-join して親 session から到達可能にする。
-  # 既定 ON（agmsg が PATH にあるとき）。team/name は導出するが --agmsg-team/--agmsg-name で上書き可。
-  local agmsg_team="" agmsg_name="" no_agmsg=false
+  # agmsg は必須（PATH に無ければ起動前に落とす）。team/name は導出するが --agmsg-team/--agmsg-name で上書き可。
+  local agmsg_team="" agmsg_name=""
   # --session が明示的に渡されたかを追跡する。未指定なら衝突時に suffix を付けて
   # 必ず新規 session を作成する（SKILL.md の "default = 新規作成" を守るため）。
   local session_explicit=false
@@ -213,10 +213,6 @@ cmd_launch() {
         agmsg_name="$2"
         shift 2
         ;;
-      --no-agmsg)
-        no_agmsg=true
-        shift
-        ;;
       *)
         if [ -z "$repo" ]; then
           repo="$1"
@@ -248,6 +244,10 @@ cmd_launch() {
     claude|codex) ;;
     *) die "--launcher は claude または codex のみ対応です: $launcher" ;;
   esac
+
+  # agmsg は必須。起動 agent の auto-join（親 session からの到達性）が dispatch の前提のため、
+  # PATH に無ければ起動前に落とす。
+  command -v agmsg >/dev/null 2>&1 || die "agmsg が利用できません（PATH に必要 — auto-join に使用）"
 
   # repo パス解決
   local repo_path
@@ -303,24 +303,22 @@ cmd_launch() {
     case "$AGMSG_HOME" in *\'*) die "AGMSG_HOME に single quote を含むパスは未対応です: $AGMSG_HOME" ;; esac
     agmsg_env_prefix="env AGMSG_HOME='$AGMSG_HOME' "
   fi
-  if [ "$no_agmsg" = false ] && command -v agmsg >/dev/null 2>&1; then
-    # team: --agmsg-team > 親の AGMSG_TEAM > repo basename
-    [ -z "$agmsg_team" ] && agmsg_team="${AGMSG_TEAM:-$(basename "$repo_path")}"
-    # name: --agmsg-name > branch名(/→-) > window名
-    if [ -z "$agmsg_name" ]; then
-      if [ -n "$branch_name" ]; then
-        agmsg_name="$(echo "$branch_name" | tr '/' '-')"
-      else
-        agmsg_name="$window_name"
-      fi
-    fi
-    agmsg_type="claude-code"
-    [ "$launcher" = codex ] && agmsg_type="codex"
-    if agmsg join "$agmsg_team" "$agmsg_name" --type "$agmsg_type" --project "$work_dir" >/dev/null 2>&1; then
-      agmsg_joined="$agmsg_name@$agmsg_team"
+  # team: --agmsg-team > 親の AGMSG_TEAM > repo basename
+  [ -z "$agmsg_team" ] && agmsg_team="${AGMSG_TEAM:-$(basename "$repo_path")}"
+  # name: --agmsg-name > branch名(/→-) > window名
+  if [ -z "$agmsg_name" ]; then
+    if [ -n "$branch_name" ]; then
+      agmsg_name="$(echo "$branch_name" | tr '/' '-')"
     else
-      tmux display-message -d 5000 "dispatch: warn: agmsg join failed ($agmsg_name@$agmsg_team)" 2>/dev/null || true
+      agmsg_name="$window_name"
     fi
+  fi
+  agmsg_type="claude-code"
+  [ "$launcher" = codex ] && agmsg_type="codex"
+  if agmsg join "$agmsg_team" "$agmsg_name" --type "$agmsg_type" --project "$work_dir" >/dev/null 2>&1; then
+    agmsg_joined="$agmsg_name@$agmsg_team"
+  else
+    die "agmsg join に失敗しました ($agmsg_name@$agmsg_team)"
   fi
 
   # prompt を一時ファイルに書き出し（worktree 側に配置）
