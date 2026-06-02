@@ -1,13 +1,13 @@
 # agmsg-go
 
-共有 SQLite ファイルを通信路にした、CLI AI エージェント間 IPC のインフラ。bash 製 [fujibee/agmsg](https://github.com/fujibee/agmsg) の Go fork。
+共有 SQLite ファイルを通信路にした、CLI AI エージェント間 IPC のインフラ。
 
 **スコープは IPC プリミティブ（送る・受け取る・購読する・宛先解決）のみ**。レビュー+修正ループや複数 issue の orchestration といった「使い方」は実装せず、利用側に委ねる（mechanism, not policy）。根拠は [design.md §2.1](design.md)。
 
 ## ドキュメント構成
 
 - `design.md` — 設計の正本（アーキテクチャ・データモデル・受信検知・ライフサイクル・トレードオフ）
-- `README.md` — 概要・オリジナルとの違い・サブコマンド一覧（人間向け入口）
+- `README.md` — 概要・サブコマンド一覧（人間向け入口）
 - `issues/` — タスク兼意思決定記録の primary store（`issues/closed/` が過去の意思決定の正本）
 
 ## 開発規約

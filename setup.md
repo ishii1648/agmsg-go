@@ -1,6 +1,6 @@
 # セットアップ
 
-`agmsg`（IPC binary）と skills 層（`dispatch` / `review-loop`）の導入手順。2 つの層の関係は [design.md §13](./design.md)、概要は [README](./README.md) を参照。
+`agmsg`（IPC binary）と skills 層（`dispatch` / `review-loop`）の導入手順。2 つの層の関係は [design.md §12](./design.md)、概要は [README](./README.md) を参照。
 
 ## TL;DR
 
