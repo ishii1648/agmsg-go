@@ -444,7 +444,10 @@ cmd_review_once() {
   # codex 2 体が同一 round-N-review.md を奪い合い verdict が壊れる事故の再発防止。
   # launch をロックで排他し、その内側で既存 pane の生存を確認する（TOCTOU を避けるためロックが先）。
   mkdir -p "$REVIEW_LOOP_DIR/$session_id"
-  local lock_dir="$REVIEW_LOOP_DIR/$session_id/round-${round}.lock"
+  # lock_dir はあえて local にしない。EXIT trap は関数 return 後（スクリプト exit 時）に評価されるため、
+  # local だとその時点でスコープ外となり set -u 下で "lock_dir: unbound variable" になって exit 1 する。
+  # スクリプトは 1 回 1 サブコマンドの短命プロセスなのでグローバルでも干渉しない。
+  lock_dir="$REVIEW_LOOP_DIR/$session_id/round-${round}.lock"
   if ! rl_try_lock "$lock_dir"; then
     echo "STATUS: LAUNCH_IN_PROGRESS"
     echo "SESSION_ID: $session_id"
