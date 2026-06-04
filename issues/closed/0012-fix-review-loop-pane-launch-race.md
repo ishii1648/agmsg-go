@@ -1,6 +1,7 @@
 ---
 decision_type: implementation
 tags: [skills, review-loop, dispatch, tmux, fish, race]
+closed_at: 2026-06-04
 ---
 
 # review-loop の pane 起動が fish 初期化レースでコマンド未実行になる
@@ -86,3 +87,21 @@ TIMEOUT と `LAUNCH_READY: no` で表面化する）。
 （純粋ロジックのみ）の対象にはできない。マーカーの whole-line 一致だけは純粋ロジックに切り出して
 回帰ガードを置ける余地があるが、本質は live tmux でしか検証できないため、ライブ tmux スモークテスト
 （新規 fish window に対し ready 確認 → コマンド着弾）で担保する。
+
+---
+
+Completed: 2026-06-04
+
+## 解決方法
+
+`wait_pane_ready`（マーカー往復で「Enter が効く」状態を確認）を review-loop / dispatch 両方に新設し、
+`launch_in_pane` / `cmd_launch` を `wait_pane_ready` → `C-u` → 本命送出に変更（Fix 1〜4）。出力に
+`LAUNCH_READY: yes|no` と WARNING を追加。live tmux スモークで新規 fish window への着弾を両スクリプト
+各 3/3 で確認。実走（codex レビュアー）で round 1 が `LAUNCH_READY: yes` で起動 → APPROVED に収束。
+
+派生: デプロイ版を実走させて issue 0006 Fix B の EXIT trap が `set -u` 下で `local lock_dir` を
+スコープ外参照し review-once を exit 1 させる既存バグを発見。`lock_dir` を global 代入に変えて修正
+（別コミット。trap は代入後にのみ登録されるため発火時は常に bound）。
+
+注: skills は agmsg バイナリに `go:embed`（`assets.go`）されデプロイは `agmsg skills install` が展開する。
+反映は `go install ./cmd/agmsg` → `agmsg skills install --force` の 2 段階（working tree 直編集では反映されない）。
