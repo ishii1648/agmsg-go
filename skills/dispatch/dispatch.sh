@@ -21,6 +21,39 @@ notify() {
   tmux display-message -d 600000 "dispatch: $1" 2>/dev/null || true
 }
 
+# pane が「コマンドを実際に実行できる対話プロンプト状態」になるまで待つ（agmsg-go issues/0012）。
+# pane_current_command がシェル名になっても fish 等の対話初期化（config.fish 読込・welcome 描画・
+# readline 起動）が未完だと、send-keys の末尾 Enter が初期化に飲まれてコマンドが実行されないレースがある。
+# 固定 sleep では負荷次第で待ちきれないため、ユニークマーカーを echo させ、その出力が capture-pane に
+# 単独行で現れることで「Enter が効きシェルがコマンドを実行できる」状態を機構的に確認する（shell 非依存）。
+# 確認できれば 0、timeout 内に確認できなければ 1。 $1: pane_id, $2: timeout(sec, 既定 30)
+wait_pane_ready() {
+  local pane_id="$1" timeout="${2:-30}" marker out i attempts cmd waited=0
+  # まずシェル名になる（シェルが起動する）まで待つ。
+  while [ "$waited" -lt "$timeout" ]; do
+    cmd=$(tmux display-message -p -t "$pane_id" '#{pane_current_command}' 2>/dev/null || echo "")
+    case "$cmd" in fish|bash|zsh|sh|dash|-fish|-bash|-zsh|-sh) break ;; esac
+    sleep 1; waited=$((waited + 1))
+  done
+  # 衝突しないマーカー（英数のみ。grep -F の素にするため記号を含めない）。
+  marker="DISPATCHREADY${RANDOM}${RANDOM}"
+  # 入力行に残骸があれば消してからマーカーを送る（残骸との連結・誤実行を防ぐ）。
+  tmux send-keys -t "$pane_id" C-u 2>/dev/null || true
+  tmux send-keys -t "$pane_id" "printf '%s\\n' $marker" Enter
+  attempts=$((timeout * 3))   # 0.33s 間隔で timeout 秒ぶん試行する
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    out=$(tmux capture-pane -p -t "$pane_id" 2>/dev/null || echo "")
+    # マーカー単独の行（= printf の出力）が見えたら ready。タイプされたコマンド行は
+    # "printf '%s\n' DISPATCHREADY..." なので whole-line 完全一致(-x)では出力行とだけ一致する。
+    if printf '%s\n' "$out" | grep -qxF "$marker"; then
+      return 0
+    fi
+    sleep 0.33; i=$((i + 1))
+  done
+  return 1
+}
+
 # repo パス解決: フルパス or ghq 短縮名（your-org/your-sandbox）
 resolve_repo() {
   local repo="$1"
@@ -391,9 +424,6 @@ cmd_launch() {
   window_index=$(tmux display-message -t "$target_pane_id" -p '#{window_index}' 2>/dev/null || echo "unknown")
   local pane_id="$target_pane_id"
 
-  # pane のシェルが起動するのを待ってから launcher を send-keys で起動
-  sleep 0.5
-
   # codex は起動時に OSC 11 で背景色 query を送るが、tmux 3.4+ は attached client
   # にしか query を passthrough しない。dispatch は detached session で起動する
   # ため、attach 前に codex を起こすと入力エリアの背景色が描画されないモードで
@@ -409,6 +439,14 @@ cmd_launch() {
       wait_iter=$((wait_iter + 1))
     done
   fi
+
+  # pane が起動コマンドを受理できる状態（プロンプトが Enter を受理し実行できる）になるまで待つ。
+  # 新規 window 直後は pane_current_command がシェル名でも fish 初期化が未完で send-keys の Enter が
+  # 飲まれるレースがある（agmsg-go issues/0012）。固定 sleep の代わりにマーカー往復で機構的に確認する。
+  local launch_ready=yes
+  wait_pane_ready "$target_pane_id" 30 || launch_ready=no
+  # マーカー実行後は入力行が空のはずだが、保険でもう一度クリアしてから本命を送る。
+  tmux send-keys -t "$target_pane_id" C-u 2>/dev/null || true
 
   if [ "$no_prompt" = true ]; then
     # launcher 名のみ送る（claude も codex も同様）
@@ -441,6 +479,10 @@ cmd_launch() {
   echo "PANE_ID: $pane_id"
   echo "REPO: $repo_path"
   echo "WORK_DIR: $work_dir"
+  echo "LAUNCH_READY: $launch_ready"
+  if [ "$launch_ready" = no ]; then
+    echo "WARNING: pane $pane_id が起動コマンドを受理できる状態を確認できないまま送出しました（fish 初期化の遅延等）。launcher が起動していない可能性があります。pane を確認してください"
+  fi
   if [ -n "$agmsg_joined" ]; then
     echo "AGMSG: $agmsg_joined (type=$agmsg_type, project=$work_dir)"
   fi

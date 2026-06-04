@@ -302,6 +302,37 @@ wait_pane_shell() {
   return 1
 }
 
+# pane が「コマンドを実際に実行できる対話プロンプト状態」になるまで待つ。
+# wait_pane_shell は pane_current_command がシェル名になった時点で返るが、新規 window 直後は
+# fish の対話初期化（config.fish 読込・welcome greeting 描画・readline 起動）が未完で、
+# send-keys の末尾 Enter が初期化処理に飲まれてコマンドが実行されないレースがある（issues/0012）。
+# ここではユニークマーカーを echo させ、その出力が capture-pane に単独行で現れることで
+# 「Enter が効きシェルがコマンドを実行できる」状態を機構的に確認する（shell 非依存）。
+# 確認できれば 0、timeout 内に確認できなければ 1。
+# $1: pane_id, $2: timeout(sec, 既定 30)
+wait_pane_ready() {
+  local pane_id="$1" timeout="${2:-30}" marker out i attempts
+  # まずシェル名に戻る（前コマンド終了 / シェル起動）のを待つ。
+  wait_pane_shell "$pane_id" "$timeout" || return 1
+  # 衝突しないマーカー（英数のみ。grep -F の素にするため記号を含めない）。
+  marker="RLREADY${RANDOM}${RANDOM}"
+  # 入力行に前 run の残骸があれば消してからマーカーを送る（残骸との連結・誤実行を防ぐ）。
+  tmux send-keys -t "$pane_id" C-u 2>/dev/null || true
+  tmux send-keys -t "$pane_id" "printf '%s\\n' $marker" Enter
+  attempts=$((timeout * 3))   # 0.33s 間隔で timeout 秒ぶん試行する
+  i=0
+  while [ "$i" -lt "$attempts" ]; do
+    out=$(tmux capture-pane -p -t "$pane_id" 2>/dev/null || echo "")
+    # マーカー単独の行（= printf の出力）が見えたら ready。タイプされたコマンド行は
+    # "printf '%s\n' RLREADY..." なので whole-line 完全一致(-x)では出力行とだけ一致する。
+    if printf '%s\n' "$out" | grep -qxF "$marker"; then
+      return 0
+    fi
+    sleep 0.33; i=$((i + 1))
+  done
+  return 1
+}
+
 # REPL に留まる claude を終了させる（Ctrl-D、効かなければ二重 Ctrl-C にフォールバック）。
 terminate_claude() {
   local pane_id="$1"
@@ -313,12 +344,17 @@ terminate_claude() {
   wait_pane_shell "$pane_id" 15 || true
 }
 
-# 既存の pane でコマンドを起動する（pane がシェルに戻ってから送る）。
+# 既存の pane でコマンドを起動する（プロンプトが Enter を受理できる状態を確認してから送る）。
+# ready 確認が取れたら 0、取れないままベストエフォートで送出したら 1 を返す（呼び出し側が
+# LAUNCH_READY として可視化する）。ready が取れなくても die せず送出は試みる（window leak 回避。
+# 起動失敗は wait-review の TIMEOUT と LAUNCH_READY: no で表面化する）。
 launch_in_pane() {
-  local pane_id="$1" work_dir="$2" cmd="$3"
-  wait_pane_shell "$pane_id" 30 || true
-  sleep 0.3
+  local pane_id="$1" work_dir="$2" cmd="$3" ready=0
+  wait_pane_ready "$pane_id" 30 && ready=1 || true
+  # マーカー実行後は入力行が空のはずだが、保険でもう一度クリアしてから本命を送る。
+  tmux send-keys -t "$pane_id" C-u 2>/dev/null || true
   tmux send-keys -t "$pane_id" "cd '$work_dir'; $cmd" Enter
+  [ "$ready" -eq 1 ]
 }
 
 # 指定 tmux session に新しい window を作り pane_id を返す（pane_id を固定して send-keys 誤爆を防ぐ）。
@@ -435,7 +471,8 @@ cmd_review_once() {
 
   local rcmd
   rcmd=$(rl_build_reviewer_cmd "$reviewer" "$work_dir" "$review_prompt" "$review_out" "$claude_sid" "$team" "$SELF" "$agmsg_home" "$round")
-  launch_in_pane "$pane" "$work_dir" "$rcmd"
+  local launch_ready=yes
+  launch_in_pane "$pane" "$work_dir" "$rcmd" || launch_ready=no
 
   [ "$round" -eq 1 ] && [ ! -f "$(manifest_path "$session_id")" ] && \
     write_manifest "$session_id" "$repo_root" "$work_dir" "$base_ref" "$tmux_session" "$reviewer" "$team"
@@ -449,6 +486,11 @@ cmd_review_once() {
   echo "BASE_REF: $base_ref"
   echo "PANE_ID: $pane"
   echo "REVIEW_OUT: $review_out"
+  echo "LAUNCH_READY: $launch_ready"
+  if [ "$launch_ready" = no ]; then
+    echo "WARNING: pane $pane が起動コマンドを受理できる状態を確認できないまま送出しました（fish 初期化の遅延等）。レビュアーが起動していない可能性があります。pane を確認し、未起動なら cleanup 後に再実行してください"
+    tmux display-message -d 6000 "review-loop: round $round launch not confirmed (pane $pane)" 2>/dev/null || true
+  fi
   tmux display-message -d 4000 "review-loop: round $round review started ($reviewer) [$session_id]" 2>/dev/null || true
 }
 
